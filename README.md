@@ -48,3 +48,5 @@ An example output of *src/cnn_data_augment.py*:
 
 
 ![](https://github.com/mengsig/GeoAI/blob/main/imgs/data_augment_result.png)
+
+Which yields an MSE loss $L = 0.846$.
