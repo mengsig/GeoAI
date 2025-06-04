@@ -34,9 +34,9 @@ dataset = 2  # defines the resolution (0 for original, 1 for 1mm, 2 for 2mm)
 use_all_parameters = True  # boolean for all (true) or 4 (false) parameters
 
 # Model parameters (unchanged)
-lay1 = 32
+lay1 = 128
 lay2 = 64
-lay3 = 128
+lay3 = 32
 kernel_size = 5
 metadata = {
     "CNN1": lay1,
