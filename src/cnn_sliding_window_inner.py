@@ -188,7 +188,7 @@ class WeightedMSELoss(nn.Module):
         w = 1 + self.alpha * target
         return (w * (pred - target)**2).mean()
 
-criterion = WeightedMSELoss(alpha=1.0)
+criterion = nn.MSELoss()
 optimizer = optim.AdamW(model.parameters(), lr=5e-6*stride)
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=500)
 
