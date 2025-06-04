@@ -12,15 +12,8 @@ import csv
 import scipy as sp
 from matplotlib.colors import LogNorm
 
-A = 6  
-plt.rc('figure', figsize=[46.82 * .5**(.5 * A), 35.61 * .5**(.5 * A)])
-plt.rc('text', usetex=True)
-plt.rc('font', family='serif')
-plt.rcParams.update({'font.size': 36})
-sns.set(font_scale=2)
 
-
-dataset = 2 #defines the resolution (0 for original, 1 for 1mm, 2 for 2mm)
+dataset = 1 #defines the resolution (0 for original, 1 for 1mm, 2 for 2mm)
 use_all_parameters = False #boolean for all (true) or 4 (false) parameters
 
 
