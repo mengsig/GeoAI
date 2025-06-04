@@ -55,7 +55,7 @@ log = False
 data_augment = False
 num_gauss_filters = 0
 # directory setup
-mydir = os.path.join(os.getcwd(), "results_SS1", f"data{dataset}_patch{patch_size}_stride{stride}")
+mydir = os.path.join(os.getcwd(), "results_UNET", f"data{dataset}_patch{patch_size}_stride{stride}")
 os.makedirs(mydir, exist_ok=True)
 if dataset == 0:
     folder = "data/OriginalResolution"
@@ -218,45 +218,108 @@ class SEBlock(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         return x * y
 
-class CNN5x5(nn.Module):
-    def __init__(self, input_channels, patch_size, kernel_size=5, reduction=16):
+class UNet(nn.Module):
+    """
+    A simple 2-level U-Net that takes an input patch of size (patch_size × patch_size),
+    downsamples twice, then upsamples back to the same resolution. It uses lay1, lay2, lay3
+    (defined above) as feature‐map widths in each stage.
+    """
+    def __init__(self, input_channels, patch_size):
         super().__init__()
-        # For patch-based processing, target size equals the patch size.
-        self.target_height = patch_size
-        self.target_width  = patch_size
+        self.patch_size = patch_size
 
-        self.layer1 = nn.Sequential(
-            nn.Conv2d(input_channels, lay1, kernel_size=kernel_size, stride=1, padding=2),
+        # ----- Encoder (downsampling) -----
+        # Level 1: conv → conv → pool
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(input_channels, lay1, kernel_size=3, padding=1),
             nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(),
-            SEBlock(lay1, reduction),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(lay1, lay1, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay1),
+            nn.LeakyReLU(inplace=True),
         )
-        self.layer2 = nn.Sequential(
-            nn.Conv2d(lay1, lay2, kernel_size=kernel_size, stride=1, padding=2),
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Level 2: conv → conv → pool
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(lay1, lay2, kernel_size=3, padding=1),
             nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(),
-            SEBlock(lay2, reduction),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(lay2, lay2, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay2),
+            nn.LeakyReLU(inplace=True),
         )
-        self.layer3 = nn.Sequential(
-            nn.Conv2d(lay2, lay3, kernel_size=kernel_size, stride=1, padding=2),
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # ----- Bottleneck -----
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(lay2, lay3, kernel_size=3, padding=1),
             nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(),
-            SEBlock(lay3, reduction),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(lay3, lay3, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay3),
+            nn.LeakyReLU(inplace=True),
         )
-        self.final_conv = nn.Conv2d(lay3, 1, kernel_size=1)
+
+        # ----- Decoder (upsampling) -----
+        # Up from lay3 → lay2
+        self.up2 = nn.ConvTranspose2d(lay3, lay2, kernel_size=2, stride=2)
+        self.dec2 = nn.Sequential(
+            nn.Conv2d(lay2 + lay2, lay2, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay2),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(lay2, lay2, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay2),
+            nn.LeakyReLU(inplace=True),
+        )
+
+        # Up from lay2 → lay1
+        self.up1 = nn.ConvTranspose2d(lay2, lay1, kernel_size=2, stride=2)
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(lay1 + lay1, lay1, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay1),
+            nn.LeakyReLU(inplace=True),
+            nn.Conv2d(lay1, lay1, kernel_size=3, padding=1),
+            nn.BatchNorm2d(lay1),
+            nn.LeakyReLU(inplace=True),
+        )
+
+        # ----- Final 1×1 conv to collapse to one channel -----
+        self.final_conv = nn.Conv2d(lay1, 1, kernel_size=1)
 
     def forward(self, x):
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.final_conv(x)
-        # Ensure output patch size is consistent with input patch size.
-        x = F.interpolate(x, size=(self.target_height, self.target_width), 
-                          mode='bilinear', align_corners=False)
-        return x.squeeze(1)
+        # Encoder
+        e1 = self.enc1(x)          # [B, lay1, H, W]
+        p1 = self.pool1(e1)        # [B, lay1, H/2, W/2]
+
+        e2 = self.enc2(p1)         # [B, lay2, H/2, W/2]
+        p2 = self.pool2(e2)        # [B, lay2, H/4, W/4]
+
+        # Bottleneck
+        b = self.bottleneck(p2)    # [B, lay3, H/4, W/4]
+
+        # Decoder
+        u2 = self.up2(b)           # [B, lay2, H/2, W/2]
+        # concatenate skip‐connection from enc2
+        c2 = torch.cat([u2, e2], dim=1)  # [B, lay2+lay2, H/2, W/2]
+        d2 = self.dec2(c2)         # [B, lay2, H/2, W/2]
+
+        u1 = self.up1(d2)          # [B, lay1, H, W]
+        # concatenate skip‐connection from enc1
+        c1 = torch.cat([u1, e1], dim=1)  # [B, lay1+lay1, H, W]
+        d1 = self.dec1(c1)         # [B, lay1, H, W]
+
+        out = self.final_conv(d1)  # [B, 1, H, W]
+
+        # Just to be safe, explicitly resize to (patch_size × patch_size)
+        out = F.interpolate(out,
+                            size=(self.patch_size, self.patch_size),
+                            mode='bilinear',
+                            align_corners=False)
+        return out.squeeze(1)  # [B, H, W]
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CNN5x5(input_channels=input_size, patch_size=patch_size).to(device)
+model = UNet(input_channels=input_size, patch_size=patch_size).to(device)
 
 # -----------------------------
 # Training Loop

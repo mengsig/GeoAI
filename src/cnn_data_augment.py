@@ -28,7 +28,7 @@ num_gauss_filters = 0 #defines the number of gaussian noise data augmentations t
 lay1 = 32
 lay2 = 64
 lay3 = 128
-kernel_size = 5
+kernel_size = 3
 
 
 log = True
