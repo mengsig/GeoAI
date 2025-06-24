@@ -1,22 +1,20 @@
 import argparse
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 import numpy as np
 import os
-import datetime
-import matplotlib.pyplot as plt
-import seaborn as sns
 import csv
-from matplotlib.colors import LogNorm
 
 # -----------------------------------
 # Command-line hyperparameters
 # -----------------------------------
 parser = argparse.ArgumentParser(
-    description="Train & evaluate CNN on sliding-window patches"
+    description="Train & evaluate CNN on sliding-window patches with bootstrap sampling for high erosion events"
 )
 parser.add_argument('patch_size', type=int,
                     help="height/width of each square patch")
@@ -27,182 +25,142 @@ args = parser.parse_args()
 patch_size = args.patch_size
 stride     = args.stride
 
-# -----------------------------
-# Dataset configuration and file reading
-# -----------------------------
-dataset = 1  # defines the resolution (0 for original, 1 for 1mm, 2 for 2mm)
-use_all_parameters = True  # boolean for all (true) or 4 (false) parameters
-
-# Model parameters (unchanged)
-lay1 = 64
-lay2 = 32
-lay3 = 16
-kernel_size = 5
-metadata = {
-    "CNN1": lay1,
-    "CNN2": lay2,
-    "CNN3": lay3,
-    "kernel": kernel_size,
-    "patch_size": patch_size,
-    "stride": stride
-}
-
 assert (patch_size - stride) % 2 == 0, "patch_size–stride must be even"
 margin    = (patch_size - stride) // 2
 crop_size = stride
 
-log = False
-data_augment = False
-num_gauss_filters = 0
-# directory setup
-mydir = os.path.join(os.getcwd(), "results_UNET", f"data{dataset}_patch{patch_size}_stride{stride}")
+# -----------------------------
+# Dataset configuration & directories
+# -----------------------------
+dataset = 2  # defines resolution
+use_all_parameters = False
+
+lay1, lay2, lay3 = 32, 64, 128
+kernel_size = 3
+metadata = {"CNN1": lay1, "CNN2": lay2, "CNN3": lay3,
+            "kernel": kernel_size,
+            "patch_size": patch_size,
+            "stride": stride}
+
+log = True
+data_augment = True
+num_gauss_filters = 1
+
+mydir = os.path.join(
+    os.getcwd(),
+    f"results_SS1/data{dataset}_patch{patch_size}_stride{stride}"
+)
 os.makedirs(mydir, exist_ok=True)
+
 if dataset == 0:
-    folder = "data/OriginalResolution"
-    x = int(805)
-    y = int(842)
+    folder, x, y = "data/OriginalResolution", 805, 842
 elif dataset == 1:
-    folder = "data/1mmResolution"
-    x = int(805 / 2 + 1)
-    y = int(842 / 2)
-elif dataset == 2:
-    folder = "data/2mmResolution"
-    x = int(805 / 4 + 1)
-    y = int(842 / 4 + 1)
+    folder, x, y = "data/1mmResolution", int(805/2 + 1), int(842/2)
 else:
-    raise ValueError("Only implemented for dataset = [0,1,2]")
+    folder, x, y = "data/2mmResolution", int(805/4 + 1), int(842/4 + 1)
 
-# List of subfolders (full image-level data)
 subfolders = ["Set3_SS2_", "Set2_SS3_", "Set1_SS4_"]
-if use_all_parameters:
-    files = ["F_Area", "F_Curv", "F_d_channel", "RawInput_elev",
-             "F_d_outlet", "F_dMax_head", "F_dmin_head", "F_HS", "F_Slope", "Output_Erosion"]
-else:
-    files = ["F_Area", "F_Curv", "RawInput_elev", "F_Slope", "Output_Erosion"]
+files = (
+    ["F_Area","F_Curv","F_d_channel","RawInput_elev",
+     "F_d_outlet","F_dMax_head","F_dmin_head","F_HS",
+     "F_Slope","Output_Erosion"]
+    if use_all_parameters else
+    ["F_Area","F_Curv","RawInput_elev","F_Slope","Output_Erosion"]
+)
 
-#number of input/output channels
-input_size = len(files) - 1  
-output_size = 1             
+input_size = len(files) - 1
+output_size = 1
 
-#prepare an array to hold the original (un-augmented) data
-data = np.zeros((len(subfolders), input_size + output_size, x, y))  #shape = [3, 5, x, y]
+# Load raw data
+raw = np.zeros((len(subfolders), input_size + 1, x, y))
+for i, pref in enumerate(subfolders):
+    for j, f in enumerate(files):
+        path = f"{folder}/{pref[:4]}/{pref}{f}.csv"
+        raw[i, j] = np.loadtxt(path, delimiter=",").reshape(x, y)
 
-
-#load original data
-for i, folder_prefix in enumerate(subfolders):
-    for j, file in enumerate(files):
-        file_path = f"{folder}/{folder_prefix[:4]}/{folder_prefix}{file}.csv"
-        data[i, j] = np.loadtxt(file_path, delimiter=",").reshape(x, y)
-
-#augmentation: 0° (original), 180°, horizontal flip, vertical flip
+# Optional augmentation
 aug_data = []
-for i in range(data.shape[0]):
-    original = data[i].copy()
+for arr in raw:
     if data_augment:
-        #180° rotation
-        rot180 = np.rot90(original, k=2, axes=(1, 2)).copy()
-        aug_data.append(rot180)
-
-        #horizontal flip (flip left/right = axis=2)
-        flip_h = np.flip(original, axis=2).copy()
-        aug_data.append(flip_h)
-
-        #vertical flip (flip up/down = axis=1)
-        flip_v = np.flip(original, axis=1).copy()
-        aug_data.append(flip_v)
-
-        #gaussian filter
-        if num_gauss_filters > 0:
-            for j in range(num_gauss_filters):
-                gaussian_filter = np.random.normal(1, 0.005*(j+1), original.shape)
-                aug_data.append(original*gaussian_filter)
-
-
-    #original
-    aug_data.append(original)  
-
+        aug_data.append(np.rot90(arr, 2, (1, 2)))
+        aug_data.append(np.flip(arr, 2))
+        aug_data.append(np.flip(arr, 1))
+        for _ in range(num_gauss_filters):
+            aug_data.append(arr * np.random.normal(1, 0.005, arr.shape))
+    aug_data.append(arr)
 data = np.stack(aug_data, axis=0)
 
-# Data preprocessing: log scale for area (index=0) and slope (index=-2)
+# Optional log scaling
 if log:
-    data[:, 0, :, :] = np.log(data[:, 0, :, :] + 1.0)
-    data[:, -2, :, :] = np.log(data[:, -2, :, :] + 1.0)
+    data[:, 0]  = np.log(data[:, 0]  + 1)
+    data[:, -2] = np.log(data[:, -2] + 1)
 
-# Separate features and labels (full image)
-features = data[:, :-1, :, :]  
-labels   = data[:,  -1, :, :]
-
-# Normalization over all training images
+# Split features/labels and normalize
+features = data[:, :-1]
+labels   = data[:,  -1]
 mean = features.mean(axis=(0, 2, 3), keepdims=True)
 std  = features.std(axis=(0, 2, 3), keepdims=True)
 features = (features - mean) / std
 
-# Convert arrays to tensors
 features = torch.tensor(features, dtype=torch.float32)
-labels   = torch.tensor(labels, dtype=torch.float32)
+labels   = torch.tensor(labels,   dtype=torch.float32)
 
 # ----------------------------------------------------------
-# Create a PatchDataset class that works on selected images
+# PatchDataset
 # ----------------------------------------------------------
 class PatchDataset(Dataset):
-    """
-    Creates patches from a subset of images defined by indices.
-    The patches are extracted using a sliding window with the given patch_size and stride.
-    """
-    def __init__(self, features, labels, patch_size, stride, image_indices):
-        self.features = features[image_indices]  # select only these images
-        self.labels = labels[image_indices]
-        self.patch_size = patch_size
-        self.stride = stride
-        self.patch_infos = []  # tuples: (image_index_in_subset, x_start, y_start)
-        N, _, H, W = self.features.shape
+    def __init__(self, feats, labs, patch_size, stride, idxs):
+        self.feats = feats[idxs]
+        self.labs  = labs [idxs]
+        self.ps = patch_size
+        self.st = stride
+        self.patch_infos = []
+        N, _, H, W = self.feats.shape
         for i in range(N):
-            # Ensure the sliding window covers the entire image by adding the last patch
-            x_starts = list(range(0, H - patch_size + 1, stride))
-            if x_starts[-1] != H - patch_size:
-                x_starts.append(H - patch_size)
-            y_starts = list(range(0, W - patch_size + 1, stride))
-            if y_starts[-1] != W - patch_size:
-                y_starts.append(W - patch_size)
-            for x_start in x_starts:
-                for y_start in y_starts:
-                    self.patch_infos.append((i, x_start, y_start))
-    
+            x_starts = list(range(0, H - self.ps + 1, self.st))
+            if x_starts[-1] != H - self.ps:
+                x_starts.append(H - self.ps)
+            y_starts = list(range(0, W - self.ps + 1, self.st))
+            if y_starts[-1] != W - self.ps:
+                y_starts.append(W - self.ps)
+            for x0 in x_starts:
+                for y0 in y_starts:
+                    self.patch_infos.append((i, x0, y0))
     def __len__(self):
         return len(self.patch_infos)
-    
     def __getitem__(self, idx):
-        i, x_start, y_start = self.patch_infos[idx]
-        feat_patch = self.features[i, :, x_start:x_start+self.patch_size, y_start:y_start+self.patch_size]
-        label_patch = self.labels[i, x_start:x_start+self.patch_size, y_start:y_start+self.patch_size]
+        i, x0, y0 = self.patch_infos[idx]
+        feat_patch  = self.feats[i, :, x0:x0+self.ps, y0:y0+self.ps]
+        label_patch = self.labs [i,  x0:x0+self.ps, y0:y0+self.ps]
         return feat_patch, label_patch
 
-# Define patch parameters
-if stride > patch_size:
-    raise ValueError("Stride must be < patch_size")
+# Split into train & validation
+train_idxs = [0, 1]
+val_idxs   = [2]
+train_ds = PatchDataset(features, labels, patch_size, stride, train_idxs)
+val_ds   = PatchDataset(features, labels, patch_size, stride, val_idxs)
 
-# Split images: use 2 images for training and 1 image for validation.
-# For example, use indices [0, 1] for training and [2] for validation.
-train_image_indices = [0, 1]
-val_image_indices = [2]
+# Compute bootstrap sampling weights: proportional to max erosion
+weights = []
+for idx in range(len(train_ds)):
+    _, lp = train_ds[idx]
+    weights.append(lp.max().item() + 1e-6)
+sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
-train_dataset = PatchDataset(features, labels, patch_size, stride, train_image_indices)
-val_dataset   = PatchDataset(features, labels, patch_size, stride, val_image_indices)
+# DataLoaders
+train_loader = DataLoader(train_ds, batch_size=16, sampler=sampler)
+val_loader   = DataLoader(val_ds,   batch_size=16, shuffle=False)
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader   = DataLoader(val_dataset, batch_size=16, shuffle=False)
-
-# Save metadata as before
+# Save metadata
 with open(os.path.join(mydir, "meta_data.txt"), "w", newline="") as f:
     w = csv.writer(f)
     for key, val in metadata.items():
         w.writerow([key, val])
 
 # -----------------------------
-# Model Definition (unchanged except patch size)
+# Model Definition
 # -----------------------------
 class SEBlock(nn.Module):
-    """Squeeze-and-Excitation block for recalibrating feature maps."""
     def __init__(self, channels, reduction=16):
         super().__init__()
         self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -218,122 +176,52 @@ class SEBlock(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         return x * y
 
-class UNet(nn.Module):
-    """
-    A simple 2-level U-Net that takes an input patch of size (patch_size × patch_size),
-    downsamples twice, then upsamples back to the same resolution. It uses lay1, lay2, lay3
-    (defined above) as feature‐map widths in each stage.
-    """
-    def __init__(self, input_channels, patch_size):
+class CNN5x5(nn.Module):
+    def __init__(self, input_channels, patch_size, kernel_size=5, reduction=16):
         super().__init__()
-        self.patch_size = patch_size
-
-        # ----- Encoder (downsampling) -----
-        # Level 1: conv → conv → pool
-        self.enc1 = nn.Sequential(
-            nn.Conv2d(input_channels, lay1, kernel_size=3, padding=1),
+        self.ps = patch_size
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(input_channels, lay1, kernel_size, padding=2),
             nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(lay1, lay1, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(inplace=True),
+            nn.LeakyReLU(),
+            SEBlock(lay1, reduction)
         )
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # Level 2: conv → conv → pool
-        self.enc2 = nn.Sequential(
-            nn.Conv2d(lay1, lay2, kernel_size=3, padding=1),
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(lay1, lay2, kernel_size, padding=2),
             nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(lay2, lay2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(inplace=True),
+            nn.LeakyReLU(),
+            SEBlock(lay2, reduction)
         )
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        # ----- Bottleneck -----
-        self.bottleneck = nn.Sequential(
-            nn.Conv2d(lay2, lay3, kernel_size=3, padding=1),
+        self.layer3 = nn.Sequential(
+            nn.Conv2d(lay2, lay3, kernel_size, padding=2),
             nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(lay3, lay3, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(inplace=True),
+            nn.LeakyReLU(),
+            SEBlock(lay3, reduction)
         )
-
-        # ----- Decoder (upsampling) -----
-        # Up from lay3 → lay2
-        self.up2 = nn.ConvTranspose2d(lay3, lay2, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(
-            nn.Conv2d(lay2 + lay2, lay2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(lay2, lay2, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(inplace=True),
-        )
-
-        # Up from lay2 → lay1
-        self.up1 = nn.ConvTranspose2d(lay2, lay1, kernel_size=2, stride=2)
-        self.dec1 = nn.Sequential(
-            nn.Conv2d(lay1 + lay1, lay1, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(inplace=True),
-            nn.Conv2d(lay1, lay1, kernel_size=3, padding=1),
-            nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(inplace=True),
-        )
-
-        # ----- Final 1×1 conv to collapse to one channel -----
-        self.final_conv = nn.Conv2d(lay1, 1, kernel_size=1)
-
+        self.final_conv = nn.Conv2d(lay3, 1, 1)
     def forward(self, x):
-        # Encoder
-        e1 = self.enc1(x)          # [B, lay1, H, W]
-        p1 = self.pool1(e1)        # [B, lay1, H/2, W/2]
-
-        e2 = self.enc2(p1)         # [B, lay2, H/2, W/2]
-        p2 = self.pool2(e2)        # [B, lay2, H/4, W/4]
-
-        # Bottleneck
-        b = self.bottleneck(p2)    # [B, lay3, H/4, W/4]
-
-        # Decoder
-        u2 = self.up2(b)           # [B, lay2, H/2, W/2]
-        # concatenate skip‐connection from enc2
-        c2 = torch.cat([u2, e2], dim=1)  # [B, lay2+lay2, H/2, W/2]
-        d2 = self.dec2(c2)         # [B, lay2, H/2, W/2]
-
-        u1 = self.up1(d2)          # [B, lay1, H, W]
-        # concatenate skip‐connection from enc1
-        c1 = torch.cat([u1, e1], dim=1)  # [B, lay1+lay1, H, W]
-        d1 = self.dec1(c1)         # [B, lay1, H, W]
-
-        out = self.final_conv(d1)  # [B, 1, H, W]
-
-        # Just to be safe, explicitly resize to (patch_size × patch_size)
-        out = F.interpolate(out,
-                            size=(self.patch_size, self.patch_size),
-                            mode='bilinear',
-                            align_corners=False)
-        return out.squeeze(1)  # [B, H, W]
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.final_conv(x)
+        x = F.interpolate(x, size=(self.ps, self.ps), mode='bilinear', align_corners=False)
+        return x.squeeze(1)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = UNet(input_channels=input_size, patch_size=patch_size).to(device)
+model = CNN5x5(input_size, patch_size).to(device)
 
-# -----------------------------
-# Training Loop
+# -----------------------------\# Training Loop
 # -----------------------------
 epochs = 500
-best_val_loss = float('inf')
-patience = 10
-early_stopping_counter = 0
-
 criterion = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.000005*stride)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=500)
+optimizer = optim.AdamW(model.parameters(), lr=0.000005 * stride)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-for epoch in range(epochs):
+best_val_loss = float('inf')
+es_cnt = 0
+patience = 10
+
+for epoch in range(1, epochs+1):
     model.train()
     train_loss = 0.0
     for batch_features, batch_labels in train_loader:
@@ -345,32 +233,30 @@ for epoch in range(epochs):
         optimizer.step()
         train_loss += loss.item() * batch_features.size(0)
     train_loss /= len(train_loader.dataset)
-    
+
     model.eval()
     val_loss = 0.0
     with torch.no_grad():
         for batch_features, batch_labels in val_loader:
             batch_features, batch_labels = batch_features.to(device), batch_labels.to(device)
             predictions = model(batch_features)
-            loss = criterion(predictions, batch_labels)
-            val_loss += loss.item() * batch_features.size(0)
+            val_loss += criterion(predictions, batch_labels).item() * batch_features.size(0)
     val_loss /= len(val_loader.dataset)
-    
+
     scheduler.step()
-    print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-    
+    print(f"Epoch {epoch}/{epochs}  Train: {train_loss:.4f}  Val: {val_loss:.4f}")
+
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        early_stopping_counter = 0
+        es_cnt = 0
         torch.save(model.state_dict(), f"{mydir}/best_model.pth")
     else:
-        early_stopping_counter += 1
-        
-    if early_stopping_counter > patience:
-        print("Early stopping triggered.")
-        break
+        es_cnt += 1
+        if es_cnt > patience:
+            print("Early stopping triggered.")
+            break
 
-# Load best model
+# Load best model for evaluation
 model.load_state_dict(torch.load(f"{mydir}/best_model.pth"))
 model.eval()
 
@@ -392,10 +278,6 @@ if log:
 features_test = test_data[:, :-1, :, :]
 features_test = (features_test - mean) / std
 labels_test   = test_data[:,  -1, :, :]
-vmax = labels_test.max()
-vmin = 0.001
-mask = labels_test < np.percentile(labels_test, 100)
-labels_test = mask*labels_test + 1e-5
 
 # Convert test data to tensors
 features_test = torch.tensor(features_test, dtype=torch.float32)
@@ -490,10 +372,10 @@ if np.any(valid_count == 0):
     print("Warning: There are pixels in the valid region with zero coverage.")
 
 # Compute the final prediction only for the valid region.
-pred_full_valid = np.reshape(mask*(pred_full_valid[valid_x0:valid_x1, valid_y0:valid_y1] / valid_count), (pred_full_valid.shape))
+pred_full_valid = pred_full_valid[valid_x0:valid_x1, valid_y0:valid_y1] / valid_count
 
 # Optionally, if you want your evaluation (and plots) to only cover the valid region:
-labels_valid = np.reshape(mask*(test_labels_img[valid_x0:valid_x1, valid_y0:valid_y1].numpy()), (pred_full_valid.shape))
+labels_valid = test_labels_img[valid_x0:valid_x1, valid_y0:valid_y1].numpy()
 
 # Compute evaluation metrics on the valid region
 mse_loss = np.mean((pred_full_valid - labels_valid) ** 2)
@@ -506,6 +388,7 @@ print(f"MAE LOSS: {mae_loss:.4f}")
 # Visualization (using the valid region)
 # -----------------------------
 
+vmin, vmax = 0.01, labels_valid.max()
 
 fig = plt.figure(figsize=(12, 6))
 gs = fig.add_gridspec(2, 2,
