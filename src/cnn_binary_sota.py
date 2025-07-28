@@ -530,6 +530,9 @@ print("Starting training...")
 best_val_loss = float('inf')
 best_val_dice = 0.0
 patience_counter = 0
+train_losses = []
+val_losses = []
+metric_history = []
 
 # Get autocast context manager
 autocast_ctx = get_autocast()
@@ -584,6 +587,7 @@ for epoch in range(config.epochs):
         scheduler.step()
     
     train_loss /= len(train_loader)
+    train_losses.append(train_loss)
     
     # Validation phase
     model.eval()
@@ -614,6 +618,7 @@ for epoch in range(config.epochs):
             val_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
     val_loss /= len(val_loader)
+    val_losses.append(val_loss)
     
     # Calculate metrics
     val_preds = np.array(val_preds)
@@ -629,6 +634,16 @@ for epoch in range(config.epochs):
     
     print(f"Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
     print(f"Metrics - Acc: {accuracy:.4f}, Prec: {precision:.4f}, Rec: {recall:.4f}, F1: {f1:.4f}, AUC: {auc:.4f}, Dice: {dice:.4f}")
+    
+    # Store metrics
+    metric_history.append({
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'auc': auc,
+        'dice': dice
+    })
     
     # Logging
     if config.use_wandb:
@@ -687,3 +702,196 @@ with open(os.path.join(mydir, 'results.json'), 'w') as f:
 
 print(f"\nTraining completed. Best validation Dice: {best_val_dice:.4f}")
 print(f"Results saved to: {mydir}")
+
+# Load best model for final evaluation
+print("\nLoading best model for final evaluation...")
+checkpoint = torch.load(os.path.join(mydir, 'best_model.pth'))
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+# Generate predictions on validation set
+print("Generating predictions on validation set...")
+all_preds = []
+all_labels = []
+all_features = []
+
+with torch.no_grad():
+    for features, labels in val_loader:
+        features, labels = features.to(device), labels.to(device)
+        outputs = model(features)
+        preds = torch.sigmoid(outputs.squeeze(1))
+        
+        all_preds.append(preds.cpu())
+        all_labels.append(labels.cpu())
+        all_features.append(features.cpu())
+
+# Concatenate all batches
+all_preds = torch.cat(all_preds)
+all_labels = torch.cat(all_labels)
+all_features = torch.cat(all_features)
+
+# Select first image for visualization
+pred_image = all_preds[0].numpy()
+label_image = all_labels[0].numpy()
+feature_image = all_features[0].numpy()
+
+# Plotting
+print("Creating visualizations...")
+
+# Set up matplotlib parameters for publication quality
+plt.rcParams['figure.figsize'] = [12, 10]
+plt.rcParams['font.size'] = 12
+plt.rcParams['axes.labelsize'] = 14
+plt.rcParams['axes.titlesize'] = 16
+plt.rcParams['xtick.labelsize'] = 12
+plt.rcParams['ytick.labelsize'] = 12
+plt.rcParams['legend.fontsize'] = 12
+
+# 1. Training history plot
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+
+# Loss curves
+epochs = range(1, len(train_losses) + 1)
+ax1.plot(epochs, train_losses, 'b-', label='Training Loss', linewidth=2)
+ax1.plot(epochs, val_losses, 'r-', label='Validation Loss', linewidth=2)
+ax1.set_xlabel('Epoch')
+ax1.set_ylabel('Loss')
+ax1.set_title('Training and Validation Loss')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+# Metrics curves
+if 'metric_history' in locals():
+    ax2.plot(epochs, [m['dice'] for m in metric_history], 'g-', label='Dice Score', linewidth=2)
+    ax2.plot(epochs, [m['accuracy'] for m in metric_history], 'b-', label='Accuracy', linewidth=2)
+    ax2.plot(epochs, [m['f1'] for m in metric_history], 'r-', label='F1 Score', linewidth=2)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Score')
+    ax2.set_title('Validation Metrics')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(os.path.join(mydir, 'training_history.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(mydir, 'training_history.pdf'), bbox_inches='tight')
+plt.close()
+
+# 2. Prediction comparison plot
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+# Input features (show first 3 channels)
+for i in range(3):
+    ax = axes[0, i]
+    im = ax.imshow(feature_image[i], cmap='viridis', aspect='auto')
+    ax.set_title(f'Input Channel {i+1}')
+    ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+# Ground truth
+ax = axes[1, 0]
+im = ax.imshow(label_image, cmap='RdBu_r', vmin=0, vmax=1, aspect='auto')
+ax.set_title('Ground Truth')
+ax.axis('off')
+plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+# Prediction
+ax = axes[1, 1]
+im = ax.imshow(pred_image, cmap='RdBu_r', vmin=0, vmax=1, aspect='auto')
+ax.set_title('Prediction')
+ax.axis('off')
+plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+# Difference
+ax = axes[1, 2]
+diff = np.abs(pred_image - label_image)
+im = ax.imshow(diff, cmap='hot', vmin=0, vmax=1, aspect='auto')
+ax.set_title('Absolute Difference')
+ax.axis('off')
+plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+plt.tight_layout()
+plt.savefig(os.path.join(mydir, 'predictions_comparison.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(mydir, 'predictions_comparison.pdf'), bbox_inches='tight')
+plt.close()
+
+# 3. Binary prediction visualization
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+# Thresholded predictions
+binary_pred = (pred_image > 0.5).astype(float)
+binary_label = label_image
+
+# True Positives, False Positives, False Negatives
+tp = binary_pred * binary_label
+fp = binary_pred * (1 - binary_label)
+fn = (1 - binary_pred) * binary_label
+
+# Create RGB image
+rgb_image = np.zeros((label_image.shape[0], label_image.shape[1], 3))
+rgb_image[:, :, 0] = fp  # False positives in red
+rgb_image[:, :, 1] = tp  # True positives in green
+rgb_image[:, :, 2] = fn  # False negatives in blue
+
+ax = axes[0]
+ax.imshow(rgb_image, aspect='auto')
+ax.set_title('Classification Results\n(Green: TP, Red: FP, Blue: FN)')
+ax.axis('off')
+
+# Binary predictions
+ax = axes[1]
+im = ax.imshow(binary_pred, cmap='gray', vmin=0, vmax=1, aspect='auto')
+ax.set_title('Binary Predictions')
+ax.axis('off')
+plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+# Binary labels
+ax = axes[2]
+im = ax.imshow(binary_label, cmap='gray', vmin=0, vmax=1, aspect='auto')
+ax.set_title('Binary Labels')
+ax.axis('off')
+plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+plt.tight_layout()
+plt.savefig(os.path.join(mydir, 'binary_classification_results.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(mydir, 'binary_classification_results.pdf'), bbox_inches='tight')
+plt.close()
+
+# 4. Metrics visualization
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Calculate final metrics
+final_preds = (all_preds.numpy() > 0.5).astype(int).flatten()
+final_labels = all_labels.numpy().astype(int).flatten()
+
+from sklearn.metrics import confusion_matrix
+cm = confusion_matrix(final_labels, final_preds)
+
+# Plot confusion matrix
+im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+ax.figure.colorbar(im, ax=ax)
+ax.set(xticks=np.arange(cm.shape[1]),
+       yticks=np.arange(cm.shape[0]),
+       xticklabels=['Negative', 'Positive'],
+       yticklabels=['Negative', 'Positive'],
+       title='Confusion Matrix',
+       ylabel='True label',
+       xlabel='Predicted label')
+
+# Add text annotations
+thresh = cm.max() / 2.
+for i in range(cm.shape[0]):
+    for j in range(cm.shape[1]):
+        ax.text(j, i, format(cm[i, j], 'd'),
+                ha="center", va="center",
+                color="white" if cm[i, j] > thresh else "black")
+
+plt.tight_layout()
+plt.savefig(os.path.join(mydir, 'confusion_matrix.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(mydir, 'confusion_matrix.pdf'), bbox_inches='tight')
+plt.close()
+
+# Save predictions and labels as CSV
+np.savetxt(os.path.join(mydir, 'predictions.csv'), pred_image, delimiter=',')
+np.savetxt(os.path.join(mydir, 'labels.csv'), label_image, delimiter=',')
+
+print("Visualizations saved!")
