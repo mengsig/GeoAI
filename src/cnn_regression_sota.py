@@ -114,33 +114,80 @@ if config.use_all_parameters:
 else:
     files = ["F_Area", "F_Curv", "RawInput_elev", "F_Slope", "Output_Erosion"]
 
+# Simple data augmentation without albumentations
+class SimpleAugmentation:
+    def __init__(self):
+        self.transforms = []
+        
+    def add_transform(self, transform_func):
+        self.transforms.append(transform_func)
+        
+    def __call__(self, image, mask):
+        for transform in self.transforms:
+            image, mask = transform(image, mask)
+        return {'image': image, 'mask': mask}
+
+def random_flip(image, mask, p=0.5):
+    if np.random.random() < p:
+        # Horizontal flip (flip along width axis)
+        image = np.flip(image, axis=2).copy()
+        mask = np.flip(mask, axis=1).copy()
+    if np.random.random() < p:
+        # Vertical flip (flip along height axis)
+        image = np.flip(image, axis=1).copy()
+        mask = np.flip(mask, axis=0).copy()
+    return image, mask
+
+def random_rotate90(image, mask, p=0.5):
+    if np.random.random() < p:
+        # Check if image is square
+        h, w = image.shape[1], image.shape[2]
+        if h == w:
+            # For square images, allow all rotations
+            k = np.random.randint(1, 4)
+        else:
+            # For non-square images, only allow 180-degree rotation
+            k = 2
+        # For image: rotate in the H,W plane (axes 1,2)
+        image = np.rot90(image, k, axes=(1, 2)).copy()
+        # For mask: rotate in the H,W plane (axes 0,1)
+        mask = np.rot90(mask, k, axes=(0, 1)).copy()
+    return image, mask
+
 # Advanced data augmentation pipeline
 def get_augmentation_pipeline(is_train=True):
     if is_train and config.use_augmentation:
-        return A.Compose([
-            A.RandomRotate90(p=0.5),
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.15, scale_limit=0.3, rotate_limit=45, p=0.5),
-            A.OneOf([
-                A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5),
-                A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.5),
-                A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, p=0.5),
-            ], p=0.4),
-            A.OneOf([
-                A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
-                A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-                A.MotionBlur(blur_limit=7, p=0.5),
-            ], p=0.3),
-            A.OneOf([
-                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
-                A.RandomGamma(gamma_limit=(80, 120), p=0.5),
-            ], p=0.3),
-            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, 
-                          min_holes=1, min_height=8, min_width=8, p=0.3),
-        ])
+        if ALBUMENTATIONS_AVAILABLE:
+            return A.Compose([
+                A.RandomRotate90(p=0.5),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.ShiftScaleRotate(shift_limit=0.15, scale_limit=0.3, rotate_limit=45, p=0.5),
+                A.OneOf([
+                    A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5),
+                    A.GridDistortion(num_steps=5, distort_limit=0.3, p=0.5),
+                    A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, p=0.5),
+                ], p=0.4),
+                A.OneOf([
+                    A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+                    A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+                    A.MotionBlur(blur_limit=7, p=0.5),
+                ], p=0.3),
+                A.OneOf([
+                    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+                    A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+                ], p=0.3),
+                A.CoarseDropout(max_holes=8, max_height=32, max_width=32, 
+                              min_holes=1, min_height=8, min_width=8, p=0.3),
+            ])
+        else:
+            # Use simple augmentation if albumentations not available
+            aug = SimpleAugmentation()
+            aug.add_transform(random_flip)
+            aug.add_transform(random_rotate90)
+            return aug
     else:
-        return A.Compose([])
+        return None
 
 # Custom Dataset class
 class ErosionDataset(torch.utils.data.Dataset):
@@ -153,16 +200,36 @@ class ErosionDataset(torch.utils.data.Dataset):
         return len(self.features)
     
     def __getitem__(self, idx):
-        feature = self.features[idx].numpy().transpose(1, 2, 0)
-        label = self.labels[idx].numpy()
-        
         if self.transform:
-            augmented = self.transform(image=feature, mask=label)
-            feature = augmented['image']
-            label = augmented['mask']
-        
-        feature = torch.from_numpy(feature.transpose(2, 0, 1)).float()
-        label = torch.from_numpy(label).float()
+            if ALBUMENTATIONS_AVAILABLE and hasattr(self.transform, 'transforms'):
+                # Albumentations expects HWC format
+                feature = self.features[idx].numpy().transpose(1, 2, 0)  # CHW -> HWC
+                label = self.labels[idx].numpy()
+                
+                # Apply augmentation
+                augmented = self.transform(image=feature, mask=label)
+                feature = augmented['image']
+                label = augmented['mask']
+                
+                # Convert back to CHW format
+                feature = torch.from_numpy(feature.transpose(2, 0, 1)).float()
+                label = torch.from_numpy(label).float()
+            else:
+                # Simple augmentation works with numpy arrays
+                feature = self.features[idx].numpy()  # Keep CHW format
+                label = self.labels[idx].numpy()
+                
+                # Apply augmentation
+                augmented = self.transform(image=feature, mask=label)
+                feature = augmented['image']
+                label = augmented['mask']
+                
+                # Convert to tensors
+                feature = torch.from_numpy(feature).float()
+                label = torch.from_numpy(label).float()
+        else:
+            feature = self.features[idx]
+            label = self.labels[idx]
         
         return feature, label
 
@@ -208,11 +275,95 @@ class CombinedRegressionLoss(nn.Module):
         
         return total_loss, {'mse': mse_loss.item(), 'mae': mae_loss.item(), 'huber': huber_loss.item()}
 
+# Simple UNet implementation as fallback
+class SimpleUNet(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(SimpleUNet, self).__init__()
+        
+        # Encoder
+        self.enc1 = self.conv_block(in_channels, 64)
+        self.enc2 = self.conv_block(64, 128)
+        self.enc3 = self.conv_block(128, 256)
+        self.enc4 = self.conv_block(256, 512)
+        
+        # Bottleneck
+        self.bottleneck = self.conv_block(512, 1024)
+        
+        # Decoder
+        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.dec4 = self.conv_block(1024, 512)
+        
+        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec3 = self.conv_block(512, 256)
+        
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec2 = self.conv_block(256, 128)
+        
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec1 = self.conv_block(128, 64)
+        
+        self.final = nn.Conv2d(64, out_channels, kernel_size=1)
+        
+        self.pool = nn.MaxPool2d(2)
+        
+    def conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x)
+        p1 = self.pool(e1)
+        
+        e2 = self.enc2(p1)
+        p2 = self.pool(e2)
+        
+        e3 = self.enc3(p2)
+        p3 = self.pool(e3)
+        
+        e4 = self.enc4(p3)
+        p4 = self.pool(e4)
+        
+        # Bottleneck
+        b = self.bottleneck(p4)
+        
+        # Decoder
+        u4 = self.up4(b)
+        u4 = torch.cat([u4, e4], dim=1)
+        d4 = self.dec4(u4)
+        
+        u3 = self.up3(d4)
+        u3 = torch.cat([u3, e3], dim=1)
+        d3 = self.dec3(u3)
+        
+        u2 = self.up2(d3)
+        u2 = torch.cat([u2, e2], dim=1)
+        d2 = self.dec2(u2)
+        
+        u1 = self.up1(d2)
+        u1 = torch.cat([u1, e1], dim=1)
+        d1 = self.dec1(u1)
+        
+        out = self.final(d1)
+        return out.squeeze(1)
+
 # Custom model with advanced features
 class AdvancedRegressionModel(nn.Module):
     def __init__(self):
         super().__init__()
         
+        if not SMP_AVAILABLE:
+            print("Using simple UNet as segmentation-models-pytorch is not available")
+            self.base_model = SimpleUNet(config.in_channels, config.classes)
+            self.use_refinement = False
+            return
+            
         # Create base model
         if config.model_name == 'unet':
             self.base_model = smp.Unet(
@@ -300,10 +451,17 @@ class AdvancedRegressionModel(nn.Module):
         # Base model prediction
         out = self.base_model(x)
         
-        # Refinement
-        out = out + self.refinement(out)
+        # Refinement (only if using SMP models)
+        if hasattr(self, 'refinement') and hasattr(self, 'use_refinement') and self.use_refinement != False:
+            out = out + self.refinement(out)
         
-        return out.squeeze(1)
+        # Handle different output shapes
+        if len(out.shape) == 4 and out.shape[1] == 1:
+            return out.squeeze(1)
+        elif len(out.shape) == 3:
+            return out
+        else:
+            return out
 
 # Mixup augmentation
 def mixup_data(x, y, alpha=1.0):
@@ -439,9 +597,9 @@ train_dataset = ErosionDataset(train_features, train_labels, transform=get_augme
 val_dataset = ErosionDataset(val_features, val_labels, transform=get_augmentation_pipeline(False))
 
 train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, 
-                         num_workers=4, pin_memory=True)
+                         num_workers=0, pin_memory=True)
 val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, 
-                       num_workers=4, pin_memory=True)
+                       num_workers=0, pin_memory=True)
 
 # Initialize model, loss, and optimizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -483,8 +641,11 @@ scaler = GradScaler() if config.use_amp else None
 ema = EMA(model, decay=config.ema_decay) if config.use_ema else None
 
 # Initialize wandb
-if config.use_wandb:
+if config.use_wandb and WANDB_AVAILABLE:
     wandb.init(project="erosion-regression", name=config.experiment_name, config=vars(config))
+elif config.use_wandb and not WANDB_AVAILABLE:
+    print("Warning: wandb logging requested but wandb not installed")
+    config.use_wandb = False
 
 # Training loop
 print("Starting training...")

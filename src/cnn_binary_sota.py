@@ -53,20 +53,29 @@ class SimpleAugmentation:
 
 def random_flip(image, mask, p=0.5):
     if np.random.random() < p:
-        # Horizontal flip
+        # Horizontal flip (flip along width axis)
+        image = np.flip(image, axis=2).copy()
+        mask = np.flip(mask, axis=1).copy()
+    if np.random.random() < p:
+        # Vertical flip (flip along height axis)
         image = np.flip(image, axis=1).copy()
         mask = np.flip(mask, axis=0).copy()
-    if np.random.random() < p:
-        # Vertical flip  
-        image = np.flip(image, axis=0).copy()
-        mask = np.flip(mask, axis=1).copy()
     return image, mask
 
 def random_rotate90(image, mask, p=0.5):
     if np.random.random() < p:
-        k = np.random.randint(1, 4)
-        image = np.rot90(image, k, axes=(0, 1)).copy()
-        mask = np.rot90(mask, k).copy()
+        # Check if image is square
+        h, w = image.shape[1], image.shape[2]
+        if h == w:
+            # For square images, allow all rotations
+            k = np.random.randint(1, 4)
+        else:
+            # For non-square images, only allow 180-degree rotation
+            k = 2
+        # For image: rotate in the H,W plane (axes 1,2)
+        image = np.rot90(image, k, axes=(1, 2)).copy()
+        # For mask: rotate in the H,W plane (axes 0,1)
+        mask = np.rot90(mask, k, axes=(0, 1)).copy()
     return image, mask
 
 # Advanced configuration
@@ -177,17 +186,32 @@ class ErosionDataset(torch.utils.data.Dataset):
     
     def __getitem__(self, idx):
         if self.transform:
-            feature = self.features[idx].numpy().transpose(1, 2, 0)  # HWC format
-            label = self.labels[idx].numpy()
-            
-            # Apply augmentation
-            augmented = self.transform(image=feature, mask=label)
-            feature = augmented['image']
-            label = augmented['mask']
-            
-            # Convert back to CHW format
-            feature = torch.from_numpy(feature.transpose(2, 0, 1)).float()
-            label = torch.from_numpy(label).float()
+            if ALBUMENTATIONS_AVAILABLE and hasattr(self.transform, 'transforms'):
+                # Albumentations expects HWC format
+                feature = self.features[idx].numpy().transpose(1, 2, 0)  # CHW -> HWC
+                label = self.labels[idx].numpy()
+                
+                # Apply augmentation
+                augmented = self.transform(image=feature, mask=label)
+                feature = augmented['image']
+                label = augmented['mask']
+                
+                # Convert back to CHW format
+                feature = torch.from_numpy(feature.transpose(2, 0, 1)).float()
+                label = torch.from_numpy(label).float()
+            else:
+                # Simple augmentation works with numpy arrays
+                feature = self.features[idx].numpy()  # Keep CHW format
+                label = self.labels[idx].numpy()
+                
+                # Apply augmentation
+                augmented = self.transform(image=feature, mask=label)
+                feature = augmented['image']
+                label = augmented['mask']
+                
+                # Convert to tensors
+                feature = torch.from_numpy(feature).float()
+                label = torch.from_numpy(label).float()
         else:
             feature = self.features[idx]
             label = self.labels[idx]
@@ -426,8 +450,8 @@ val_labels = torch.stack([val_dataset[i][1] for i in range(len(val_dataset))])
 train_dataset = ErosionDataset(train_features, train_labels, transform=get_augmentation_pipeline(True))
 val_dataset = ErosionDataset(val_features, val_labels, transform=get_augmentation_pipeline(False))
 
-train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=4)
-val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=4)
+train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, num_workers=0)
 
 # Initialize model, loss, and optimizer
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
