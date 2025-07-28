@@ -12,13 +12,62 @@ import seaborn as sns
 import csv
 from matplotlib.colors import LogNorm
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+try:
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
+    ALBUMENTATIONS_AVAILABLE = True
+except ImportError:
+    ALBUMENTATIONS_AVAILABLE = False
+    print("Warning: albumentations not installed. Install with: pip install albumentations")
 import cv2
 from tqdm import tqdm
-import wandb
+import json
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with: pip install wandb")
+
 from torchvision import models
-import segmentation_models_pytorch as smp
+
+try:
+    import segmentation_models_pytorch as smp
+    SMP_AVAILABLE = True
+except ImportError:
+    SMP_AVAILABLE = False
+    print("Warning: segmentation-models-pytorch not installed. Install with: pip install segmentation-models-pytorch")
+
+# Simple data augmentation without albumentations
+class SimpleAugmentation:
+    def __init__(self):
+        self.transforms = []
+        
+    def add_transform(self, transform_func):
+        self.transforms.append(transform_func)
+        
+    def __call__(self, image, mask):
+        for transform in self.transforms:
+            image, mask = transform(image, mask)
+        return {'image': image, 'mask': mask}
+
+def random_flip(image, mask, p=0.5):
+    if np.random.random() < p:
+        # Horizontal flip
+        image = np.flip(image, axis=1).copy()
+        mask = np.flip(mask, axis=0).copy()
+    if np.random.random() < p:
+        # Vertical flip  
+        image = np.flip(image, axis=0).copy()
+        mask = np.flip(mask, axis=1).copy()
+    return image, mask
+
+def random_rotate90(image, mask, p=0.5):
+    if np.random.random() < p:
+        k = np.random.randint(1, 4)
+        image = np.rot90(image, k, axes=(0, 1)).copy()
+        mask = np.rot90(mask, k).copy()
+    return image, mask
 
 # Advanced configuration
 class Config:
@@ -90,23 +139,31 @@ else:
 # Advanced data augmentation pipeline
 def get_augmentation_pipeline(is_train=True):
     if is_train and config.use_augmentation:
-        return A.Compose([
-            A.RandomRotate90(p=0.5),
-            A.Flip(p=0.5),
-            A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=45, p=0.5),
-            A.OneOf([
-                A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5),
-                A.GridDistortion(p=0.5),
-                A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, p=0.5),
-            ], p=0.3),
-            A.OneOf([
-                A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
-                A.GaussianBlur(blur_limit=(3, 7), p=0.5),
-            ], p=0.3),
-            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.3),
-        ])
+        if ALBUMENTATIONS_AVAILABLE:
+            return A.Compose([
+                A.RandomRotate90(p=0.5),
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=45, p=0.5),
+                A.OneOf([
+                    A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5),
+                    A.GridDistortion(p=0.5),
+                    A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, p=0.5),
+                ], p=0.3),
+                A.OneOf([
+                    A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+                    A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+                ], p=0.3),
+                A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.3),
+            ])
+        else:
+            # Use simple augmentation if albumentations not available
+            aug = SimpleAugmentation()
+            aug.add_transform(random_flip)
+            aug.add_transform(random_rotate90)
+            return aug
     else:
-        return A.Compose([])
+        return None
 
 # Custom Dataset class with advanced augmentation
 class ErosionDataset(torch.utils.data.Dataset):
@@ -119,18 +176,21 @@ class ErosionDataset(torch.utils.data.Dataset):
         return len(self.features)
     
     def __getitem__(self, idx):
-        feature = self.features[idx].numpy().transpose(1, 2, 0)  # HWC format for albumentations
-        label = self.labels[idx].numpy()
-        
         if self.transform:
+            feature = self.features[idx].numpy().transpose(1, 2, 0)  # HWC format
+            label = self.labels[idx].numpy()
+            
             # Apply augmentation
             augmented = self.transform(image=feature, mask=label)
             feature = augmented['image']
             label = augmented['mask']
-        
-        # Convert back to CHW format
-        feature = torch.from_numpy(feature.transpose(2, 0, 1)).float()
-        label = torch.from_numpy(label).float()
+            
+            # Convert back to CHW format
+            feature = torch.from_numpy(feature.transpose(2, 0, 1)).float()
+            label = torch.from_numpy(label).float()
+        else:
+            feature = self.features[idx]
+            label = self.labels[idx]
         
         return feature, label
 
@@ -182,8 +242,90 @@ class CombinedLoss(nn.Module):
         dice = self.dice_loss(inputs, targets)
         return self.focal_weight * focal + self.dice_weight * dice
 
+# Simple UNet implementation as fallback
+class SimpleUNet(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(SimpleUNet, self).__init__()
+        
+        # Encoder
+        self.enc1 = self.conv_block(in_channels, 64)
+        self.enc2 = self.conv_block(64, 128)
+        self.enc3 = self.conv_block(128, 256)
+        self.enc4 = self.conv_block(256, 512)
+        
+        # Bottleneck
+        self.bottleneck = self.conv_block(512, 1024)
+        
+        # Decoder
+        self.up4 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
+        self.dec4 = self.conv_block(1024, 512)
+        
+        self.up3 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.dec3 = self.conv_block(512, 256)
+        
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.dec2 = self.conv_block(256, 128)
+        
+        self.up1 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.dec1 = self.conv_block(128, 64)
+        
+        self.final = nn.Conv2d(64, out_channels, kernel_size=1)
+        
+        self.pool = nn.MaxPool2d(2)
+        
+    def conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x)
+        p1 = self.pool(e1)
+        
+        e2 = self.enc2(p1)
+        p2 = self.pool(e2)
+        
+        e3 = self.enc3(p2)
+        p3 = self.pool(e3)
+        
+        e4 = self.enc4(p3)
+        p4 = self.pool(e4)
+        
+        # Bottleneck
+        b = self.bottleneck(p4)
+        
+        # Decoder
+        u4 = self.up4(b)
+        u4 = torch.cat([u4, e4], dim=1)
+        d4 = self.dec4(u4)
+        
+        u3 = self.up3(d4)
+        u3 = torch.cat([u3, e3], dim=1)
+        d3 = self.dec3(u3)
+        
+        u2 = self.up2(d3)
+        u2 = torch.cat([u2, e2], dim=1)
+        d2 = self.dec2(u2)
+        
+        u1 = self.up1(d2)
+        u1 = torch.cat([u1, e1], dim=1)
+        d1 = self.dec1(u1)
+        
+        out = self.final(d1)
+        return out
+
 # Model factory
 def create_model():
+    if not SMP_AVAILABLE:
+        print("Using simple UNet as segmentation-models-pytorch is not available")
+        return SimpleUNet(config.in_channels, config.classes)
+    
     if config.model_name == 'unet':
         model = smp.Unet(
             encoder_name=config.encoder_name,
@@ -308,8 +450,11 @@ scheduler = optim.lr_scheduler.OneCycleLR(
 scaler = GradScaler() if config.use_amp else None
 
 # Initialize wandb if enabled
-if config.use_wandb:
+if config.use_wandb and WANDB_AVAILABLE:
     wandb.init(project="erosion-prediction", name=config.experiment_name, config=vars(config))
+elif config.use_wandb and not WANDB_AVAILABLE:
+    print("Warning: wandb logging requested but wandb not installed")
+    config.use_wandb = False
 
 # Training loop with advanced techniques
 print("Starting training...")
@@ -466,7 +611,6 @@ results = {
 }
 
 with open(os.path.join(mydir, 'results.json'), 'w') as f:
-    import json
     json.dump(results, f, indent=4)
 
 print(f"\nTraining completed. Best validation Dice: {best_val_dice:.4f}")

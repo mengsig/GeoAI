@@ -56,14 +56,41 @@ Three advanced model implementations have been created:
 
 ## Installation
 
+### Option 1: Minimal Installation (Core functionality only)
 ```bash
 # Create virtual environment
 python -m venv geoai_sota
 source geoai_sota/bin/activate  # On Windows: geoai_sota\Scripts\activate
 
-# Install dependencies
+# Install minimal dependencies
+pip install -r requirements_minimal.txt
+```
+
+### Option 2: Full Installation (All features)
+```bash
+# Create virtual environment
+python -m venv geoai_sota
+source geoai_sota/bin/activate  # On Windows: geoai_sota\Scripts\activate
+
+# Install all dependencies
 pip install -r requirements.txt
 ```
+
+**Note**: The models will work with minimal installation but with reduced functionality:
+- Without `segmentation-models-pytorch`: Uses simple UNet architecture
+- Without `albumentations`: Uses basic data augmentation
+- Without `wandb`: No experiment tracking
+- Without `einops`: TransUNet model won't be available
+
+## Testing Installation
+
+After installation, you can verify that the models work correctly:
+
+```bash
+python test_models.py
+```
+
+This will test all three models and report any issues.
 
 ## Usage
 
