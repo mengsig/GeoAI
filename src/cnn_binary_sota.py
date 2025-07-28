@@ -513,7 +513,7 @@ else:
 def get_autocast():
     try:
         # Try new API first
-        return lambda: autocast('cuda')
+        return lambda: autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu')
     except TypeError:
         # Fall back to old API
         return lambda: autocast()

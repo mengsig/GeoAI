@@ -59,7 +59,7 @@ class Config:
     # Training parameters
     batch_size = 6
     epochs = 250
-    learning_rate = 1e-3
+    learning_rate = 5e-4  # Reduced to prevent NaN
     weight_decay = 1e-4
     patience = 25
     
@@ -685,7 +685,7 @@ ema = EMA(model, decay=config.ema_decay) if config.use_ema else None
 def get_autocast():
     try:
         # Try new API first
-        return lambda: autocast('cuda')
+        return lambda: autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu')
     except TypeError:
         # Fall back to old API
         return lambda: autocast()
@@ -786,7 +786,12 @@ for epoch in range(config.epochs):
                 if config.use_ema:
                     ema.update()
         
-        train_loss += loss.item() * config.gradient_accumulation_steps
+        # Check for NaN
+        if not torch.isnan(loss):
+            train_loss += loss.item() * config.gradient_accumulation_steps
+        else:
+            print(f"Warning: NaN loss detected in training at batch {batch_idx}")
+        
         train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
     train_loss /= len(train_loader)
@@ -949,15 +954,15 @@ plt.close()
 # Save final results
 results = {
     'config': vars(config),
-    'best_val_loss': best_val_loss,
-    'best_val_rmse': best_val_rmse,
+    'best_val_loss': float(best_val_loss) if not np.isnan(best_val_loss) else None,
+    'best_val_rmse': float(best_val_rmse) if not np.isnan(best_val_rmse) else None,
     'final_metrics': {
-        'rmse': rmse,
-        'mae': mae,
-        'rmse_denorm': rmse_denorm,
-        'mae_denorm': mae_denorm,
-        'pearson_corr': pearson_corr,
-        'spearman_corr': spearman_corr
+        'rmse': float(rmse) if not np.isnan(rmse) else None,
+        'mae': float(mae) if not np.isnan(mae) else None,
+        'rmse_denorm': float(rmse_denorm) if not np.isnan(rmse_denorm) else None,
+        'mae_denorm': float(mae_denorm) if not np.isnan(mae_denorm) else None,
+        'pearson_corr': float(pearson_corr) if not np.isnan(pearson_corr) else None,
+        'spearman_corr': float(spearman_corr) if not np.isnan(spearman_corr) else None
     },
     'normalization': {
         'feature_mean': mean.tolist(),
@@ -970,5 +975,180 @@ results = {
 with open(os.path.join(mydir, 'results.json'), 'w') as f:
     json.dump(results, f, indent=4)
 
-print(f"\nTraining completed. Best validation RMSE: {best_val_rmse:.4f}")
+print(f"\nTraining completed. Best validation RMSE: {best_val_rmse:.4f}" if not np.isnan(best_val_rmse) else "\nTraining completed with NaN loss.")
 print(f"Results saved to: {mydir}")
+
+# Load best model for final evaluation and plotting
+print("\nLoading best model for final evaluation...")
+if os.path.exists(os.path.join(mydir, 'best_model.pth')):
+    checkpoint = torch.load(os.path.join(mydir, 'best_model.pth'))
+    model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+# Generate predictions on validation set
+print("Generating predictions on validation set...")
+all_preds = []
+all_labels = []
+all_features = []
+
+with torch.no_grad():
+    for features, labels in val_loader:
+        features, labels = features.to(device), labels.to(device)
+        outputs = model(features)
+        
+        # Check for NaN
+        if not torch.isnan(outputs).any():
+            all_preds.append(outputs.cpu())
+            all_labels.append(labels.cpu())
+            all_features.append(features.cpu())
+
+if len(all_preds) > 0:
+    # Concatenate all batches
+    all_preds = torch.cat(all_preds)
+    all_labels = torch.cat(all_labels)
+    all_features = torch.cat(all_features)
+    
+    # Select first image for visualization
+    pred_image = all_preds[0].numpy()
+    label_image = all_labels[0].numpy()
+    feature_image = all_features[0].numpy()
+    
+    # Denormalize for visualization
+    pred_image_denorm = pred_image * label_std + label_mean
+    label_image_denorm = label_image * label_std + label_mean
+    
+    # Plotting
+    print("Creating visualizations...")
+    
+    # Set up matplotlib parameters for publication quality
+    plt.rcParams['figure.figsize'] = [12, 10]
+    plt.rcParams['font.size'] = 12
+    plt.rcParams['axes.labelsize'] = 14
+    plt.rcParams['axes.titlesize'] = 16
+    plt.rcParams['xtick.labelsize'] = 12
+    plt.rcParams['ytick.labelsize'] = 12
+    plt.rcParams['legend.fontsize'] = 12
+    
+    # 2. Prediction comparison plot
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    
+    # Input features (show first 3 channels)
+    channel_names = ['Area (log)', 'Curvature', 'Elevation'] if config.use_all_parameters else ['Area (log)', 'Curvature', 'Elevation']
+    for i in range(min(3, feature_image.shape[0])):
+        ax = axes[0, i]
+        im = ax.imshow(feature_image[i], cmap='viridis', aspect='auto')
+        ax.set_title(f'Input: {channel_names[i]}')
+        ax.axis('off')
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    # Ground truth (denormalized)
+    ax = axes[1, 0]
+    vmin = max(0.01, label_image_denorm.min()) if label_image_denorm.min() > 0 else 0.01
+    vmax = label_image_denorm.max() if label_image_denorm.max() > vmin else vmin * 10
+    im = ax.imshow(label_image_denorm, cmap='viridis', aspect='auto',
+                   norm=LogNorm(vmin=vmin, vmax=vmax))
+    ax.set_title('Ground Truth Erosion (Log Scale)')
+    ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    # Prediction (denormalized)
+    ax = axes[1, 1]
+    vmin = max(0.01, pred_image_denorm.min()) if pred_image_denorm.min() > 0 else 0.01
+    vmax = pred_image_denorm.max() if pred_image_denorm.max() > vmin else vmin * 10
+    im = ax.imshow(pred_image_denorm, cmap='viridis', aspect='auto',
+                   norm=LogNorm(vmin=vmin, vmax=vmax))
+    ax.set_title('Predicted Erosion (Log Scale)')
+    ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    # Error map
+    ax = axes[1, 2]
+    error = np.abs(pred_image_denorm - label_image_denorm)
+    im = ax.imshow(np.log10(error + 1), cmap='hot', aspect='auto')
+    ax.set_title('Log10(|Error| + 1)')
+    ax.axis('off')
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(mydir, 'predictions_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(mydir, 'predictions_comparison.pdf'), bbox_inches='tight')
+    plt.close()
+    
+    # 3. Scatter plot of predictions vs labels
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    # Flatten and denormalize all predictions
+    all_preds_flat = all_preds.numpy().flatten()
+    all_labels_flat = all_labels.numpy().flatten()
+    all_preds_denorm = all_preds_flat * label_std + label_mean
+    all_labels_denorm = all_labels_flat * label_std + label_mean
+    
+    # Remove NaN values
+    mask = ~(np.isnan(all_preds_denorm) | np.isnan(all_labels_denorm))
+    all_preds_denorm = all_preds_denorm[mask]
+    all_labels_denorm = all_labels_denorm[mask]
+    
+    if len(all_preds_denorm) > 0:
+        # Scatter plot
+        plt.scatter(all_labels_denorm, all_preds_denorm, alpha=0.5, s=1)
+        
+        # Add diagonal line
+        min_val = min(all_labels_denorm.min(), all_preds_denorm.min())
+        max_val = max(all_labels_denorm.max(), all_preds_denorm.max())
+        plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect Prediction')
+        
+        # Calculate R²
+        from sklearn.metrics import r2_score
+        r2 = r2_score(all_labels_denorm, all_preds_denorm) if len(all_labels_denorm) > 1 else 0
+        
+        plt.xlabel('True Erosion Values')
+        plt.ylabel('Predicted Erosion Values')
+        plt.title(f'Predictions vs Ground Truth\nR² = {r2:.3f}, RMSE = {rmse_denorm:.3f}' if not np.isnan(rmse_denorm) else 'Predictions vs Ground Truth')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Make it square
+        plt.axis('equal')
+        plt.xlim(min_val, max_val)
+        plt.ylim(min_val, max_val)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(mydir, 'scatter_plot.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(mydir, 'scatter_plot.pdf'), bbox_inches='tight')
+    plt.close()
+    
+    # 4. Error distribution plot
+    if len(all_preds_denorm) > 0:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+        
+        # Histogram of errors
+        errors = all_preds_denorm - all_labels_denorm
+        ax1.hist(errors, bins=50, alpha=0.7, color='blue', edgecolor='black')
+        ax1.axvline(x=0, color='red', linestyle='--', linewidth=2)
+        ax1.set_xlabel('Prediction Error')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title(f'Error Distribution\nMean: {np.mean(errors):.3f}, Std: {np.std(errors):.3f}')
+        ax1.grid(True, alpha=0.3)
+        
+        # Histogram of relative errors
+        rel_errors = errors / (all_labels_denorm + 1e-8) * 100  # Percentage error
+        rel_errors = np.clip(rel_errors, -200, 200)  # Clip extreme values
+        ax2.hist(rel_errors, bins=50, alpha=0.7, color='green', edgecolor='black')
+        ax2.axvline(x=0, color='red', linestyle='--', linewidth=2)
+        ax2.set_xlabel('Relative Error (%)')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title(f'Relative Error Distribution\nMedian: {np.median(rel_errors):.1f}%')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(mydir, 'error_distribution.png'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(mydir, 'error_distribution.pdf'), bbox_inches='tight')
+        plt.close()
+    
+    # Save predictions and labels as CSV
+    np.savetxt(os.path.join(mydir, 'predictions.csv'), pred_image_denorm, delimiter=',')
+    np.savetxt(os.path.join(mydir, 'labels.csv'), label_image_denorm, delimiter=',')
+    
+    print("Visualizations saved!")
+else:
+    print("Warning: No valid predictions to visualize (all NaN)")
