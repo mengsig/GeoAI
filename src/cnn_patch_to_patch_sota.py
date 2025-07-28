@@ -4,7 +4,11 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
 import numpy as np
 import os
 import datetime
@@ -808,7 +812,13 @@ def lr_lambda(epoch):
 scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 # Initialize gradient scaler and EMA
-scaler = GradScaler() if config.use_amp else None
+if config.use_amp:
+    try:
+        scaler = GradScaler('cuda')
+    except TypeError:
+        scaler = GradScaler()
+else:
+    scaler = None
 ema = EMA(model, decay=config.ema_decay) if config.use_ema else None
 
 # Initialize wandb

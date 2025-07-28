@@ -3,7 +3,11 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast
+try:
+    from torch.amp import GradScaler
+except ImportError:
+    from torch.cuda.amp import GradScaler
 import numpy as np
 import os
 import datetime
@@ -64,14 +68,8 @@ def random_flip(image, mask, p=0.5):
 
 def random_rotate90(image, mask, p=0.5):
     if np.random.random() < p:
-        # Check if image is square
-        h, w = image.shape[1], image.shape[2]
-        if h == w:
-            # For square images, allow all rotations
-            k = np.random.randint(1, 4)
-        else:
-            # For non-square images, only allow 180-degree rotation
-            k = 2
+        # Only do 180-degree rotation to preserve shape
+        k = 2
         # For image: rotate in the H,W plane (axes 1,2)
         image = np.rot90(image, k, axes=(1, 2)).copy()
         # For mask: rotate in the H,W plane (axes 0,1)
@@ -471,7 +469,13 @@ scheduler = optim.lr_scheduler.OneCycleLR(
 )
 
 # Initialize gradient scaler for AMP
-scaler = GradScaler() if config.use_amp else None
+if config.use_amp:
+    try:
+        scaler = GradScaler('cuda')
+    except TypeError:
+        scaler = GradScaler()
+else:
+    scaler = None
 
 # Initialize wandb if enabled
 if config.use_wandb and WANDB_AVAILABLE:
