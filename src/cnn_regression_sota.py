@@ -72,8 +72,11 @@ class Config:
     cutmix_alpha = 1.0
     
     # Loss parameters
-    loss_type = 'combined'  # Options: 'mse', 'mae', 'huber', 'combined'
+    loss_type = 'extreme_weighted'  # Options: 'mse', 'mae', 'huber', 'combined', 'extreme_weighted'
     huber_delta = 1.0
+    use_extreme_weighting = True  # Weight extreme erosion events more heavily
+    extreme_threshold_percentile = 75  # Values above this percentile are considered extreme
+    extreme_weight_multiplier = 3.0  # How much more to weight extreme events
     
     # Advanced training
     use_amp = True
@@ -275,6 +278,58 @@ class CombinedRegressionLoss(nn.Module):
                      self.huber_weight * huber_loss)
         
         return total_loss, {'mse': mse_loss.item(), 'mae': mae_loss.item(), 'huber': huber_loss.item()}
+
+class ExtremeWeightedMSELoss(nn.Module):
+    """MSE Loss with higher weights for extreme erosion values"""
+    def __init__(self, threshold_percentile=75, extreme_weight=3.0):
+        super().__init__()
+        self.threshold_percentile = threshold_percentile
+        self.extreme_weight = extreme_weight
+        self.threshold = None
+        
+    def forward(self, pred, target):
+        # Calculate threshold based on target values if not set
+        if self.threshold is None:
+            with torch.no_grad():
+                self.threshold = torch.quantile(target.abs(), self.threshold_percentile / 100.0)
+        
+        # Calculate MSE
+        mse = (pred - target) ** 2
+        
+        # Apply higher weight to extreme values
+        weights = torch.where(target.abs() > self.threshold, self.extreme_weight, 1.0)
+        weighted_mse = mse * weights
+        
+        return weighted_mse.mean()
+
+class ExtremeWeightedRegressionLoss(nn.Module):
+    """Combined regression loss with focus on extreme erosion events"""
+    def __init__(self, mse_weight=0.4, mae_weight=0.2, huber_weight=0.2, extreme_weight=0.2, 
+                 threshold_percentile=75, extreme_multiplier=3.0):
+        super().__init__()
+        self.mse = nn.MSELoss()
+        self.mae = nn.L1Loss()
+        self.huber = HuberLoss(delta=config.huber_delta)
+        self.extreme_mse = ExtremeWeightedMSELoss(threshold_percentile, extreme_multiplier)
+        
+        self.mse_weight = mse_weight
+        self.mae_weight = mae_weight
+        self.huber_weight = huber_weight
+        self.extreme_weight = extreme_weight
+        
+    def forward(self, pred, target):
+        mse_loss = self.mse(pred, target)
+        mae_loss = self.mae(pred, target)
+        huber_loss = self.huber(pred, target)
+        extreme_loss = self.extreme_mse(pred, target)
+        
+        total_loss = (self.mse_weight * mse_loss + 
+                     self.mae_weight * mae_loss + 
+                     self.huber_weight * huber_loss +
+                     self.extreme_weight * extreme_loss)
+        
+        return total_loss, {'mse': mse_loss.item(), 'mae': mae_loss.item(), 
+                           'huber': huber_loss.item(), 'extreme': extreme_loss.item()}
 
 # Simple UNet implementation as fallback
 class SimpleUNet(nn.Module):
@@ -650,6 +705,12 @@ elif config.loss_type == 'huber':
     criterion = HuberLoss(delta=config.huber_delta)
 elif config.loss_type == 'combined':
     criterion = CombinedRegressionLoss()
+elif config.loss_type == 'extreme_weighted':
+    criterion = ExtremeWeightedRegressionLoss(
+        threshold_percentile=config.extreme_threshold_percentile,
+        extreme_multiplier=config.extreme_weight_multiplier
+    )
+    print(f"Using ExtremeWeightedRegressionLoss with threshold at {config.extreme_threshold_percentile}th percentile, weight={config.extreme_weight_multiplier}x")
 else:
     raise ValueError(f"Unknown loss type: {config.loss_type}")
 

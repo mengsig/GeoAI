@@ -107,8 +107,11 @@ class Config:
     
     # Loss parameters
     use_focal_loss = True
+    use_extreme_weighting = True  # Weight extreme erosion events more heavily
     focal_alpha = 0.25
     focal_gamma = 2.0
+    extreme_pos_weight = 3.0  # Weight multiplier for positive class (extreme erosion)
+    auto_balance_weight = True  # Automatically calculate pos_weight based on class imbalance
     
     # Advanced training
     use_amp = True  # Automatic Mixed Precision
@@ -266,6 +269,39 @@ class CombinedLoss(nn.Module):
         focal = self.focal_loss(inputs, targets)
         dice = self.dice_loss(inputs, targets)
         return self.focal_weight * focal + self.dice_weight * dice
+
+class WeightedBCELoss(nn.Module):
+    """BCE Loss with higher weights for extreme erosion events (positive class)"""
+    def __init__(self, pos_weight=2.0):
+        super().__init__()
+        self.pos_weight = pos_weight
+        
+    def forward(self, inputs, targets):
+        # Calculate BCE with pos_weight
+        loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        
+        # Apply higher weight to positive class (extreme erosion)
+        weights = torch.where(targets > 0.5, self.pos_weight, 1.0)
+        weighted_loss = loss * weights
+        
+        return weighted_loss.mean()
+
+class ExtremeFocusedLoss(nn.Module):
+    """Combined loss that focuses on extreme erosion events"""
+    def __init__(self, focal_weight=0.5, dice_weight=0.3, extreme_weight=0.2, pos_weight=3.0):
+        super().__init__()
+        self.focal_loss = FocalBCELoss(alpha=config.focal_alpha, gamma=config.focal_gamma)
+        self.dice_loss = DiceLoss()
+        self.weighted_bce = WeightedBCELoss(pos_weight=pos_weight)
+        self.focal_weight = focal_weight
+        self.dice_weight = dice_weight
+        self.extreme_weight = extreme_weight
+        
+    def forward(self, inputs, targets):
+        focal = self.focal_loss(inputs, targets)
+        dice = self.dice_loss(inputs, targets)
+        weighted = self.weighted_bce(inputs, targets)
+        return self.focal_weight * focal + self.dice_weight * dice + self.extreme_weight * weighted
 
 # Simple UNet implementation as fallback
 class SimpleUNet(nn.Module):
@@ -456,6 +492,24 @@ labels = data[:, -1, :, :]
 threshold = np.percentile(labels, config.threshold_percentile)
 binary_labels = (labels > threshold).astype(np.float32)
 
+# Analyze data distribution for extreme event weighting
+print(f"\nErosion value statistics:")
+print(f"  Min: {labels.min():.4f}, Max: {labels.max():.4f}")
+print(f"  Threshold ({config.threshold_percentile}th percentile): {threshold:.4f}")
+print(f"  Positive class (extreme erosion): {binary_labels.sum():.0f} ({binary_labels.mean()*100:.1f}%)")
+print(f"  Negative class: {(1-binary_labels).sum():.0f} ({(1-binary_labels).mean()*100:.1f}%)")
+
+if config.use_extreme_weighting:
+    class_ratio = (1 - binary_labels.mean()) / (binary_labels.mean() + 1e-8)
+    print(f"  Class imbalance ratio: {class_ratio:.2f}:1")
+    
+    if config.auto_balance_weight:
+        # Automatically calculate pos_weight based on class imbalance
+        config.extreme_pos_weight = min(class_ratio, 10.0)  # Cap at 10 to avoid extreme weights
+        print(f"  Auto-calculated pos_weight={config.extreme_pos_weight:.2f} based on class imbalance")
+    else:
+        print(f"  Using fixed pos_weight={config.extreme_pos_weight} for extreme events")
+
 # Normalize features
 mean = features.mean(axis=(0, 2, 3), keepdims=True)
 std = features.std(axis=(0, 2, 3), keepdims=True)
@@ -488,7 +542,13 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = create_model().to(device)
 
 if config.use_focal_loss:
-    criterion = CombinedLoss()
+    # Use extreme-focused loss if enabled
+    if config.use_extreme_weighting:
+        criterion = ExtremeFocusedLoss(pos_weight=config.extreme_pos_weight)
+        print(f"Using ExtremeFocusedLoss with pos_weight={config.extreme_pos_weight}")
+    else:
+        criterion = CombinedLoss()
+        print("Using standard CombinedLoss")
 else:
     criterion = nn.BCEWithLogitsLoss()
 
