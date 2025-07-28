@@ -11,13 +11,28 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import csv
 from matplotlib.colors import LogNorm
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+try:
+    import albumentations as A
+    from albumentations.pytorch import ToTensorV2
+    ALBUMENTATIONS_AVAILABLE = True
+except ImportError:
+    ALBUMENTATIONS_AVAILABLE = False
+    print("Warning: albumentations not installed. Install with: pip install albumentations")
 import cv2
 from tqdm import tqdm
-import wandb
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with: pip install wandb")
 from torchvision import models
-import segmentation_models_pytorch as smp
+try:
+    import segmentation_models_pytorch as smp
+    SMP_AVAILABLE = True
+except ImportError:
+    SMP_AVAILABLE = False
+    print("Warning: segmentation-models-pytorch not installed. Install with: pip install segmentation-models-pytorch")
 from scipy.stats import pearsonr, spearmanr
 import json
 
@@ -289,6 +304,21 @@ class AdvancedRegressionModel(nn.Module):
         out = out + self.refinement(out)
         
         return out.squeeze(1)
+
+# Mixup augmentation
+def mixup_data(x, y, alpha=1.0):
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+    
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(x.device)
+    
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    
+    return mixed_x, y_a, y_b, lam
 
 # CutMix augmentation
 def cutmix_data(x, y, alpha=1.0):
