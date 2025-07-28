@@ -3,7 +3,10 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset, random_split
-from torch.cuda.amp import autocast
+try:
+    from torch.amp import autocast
+except ImportError:
+    from torch.cuda.amp import autocast
 try:
     from torch.amp import GradScaler
 except ImportError:
@@ -148,17 +151,17 @@ def get_augmentation_pipeline(is_train=True):
     if is_train and config.use_augmentation:
         if ALBUMENTATIONS_AVAILABLE:
             return A.Compose([
-                A.RandomRotate90(p=0.5),
+                # Only use transforms that preserve shape
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
                 A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=45, p=0.5),
                 A.OneOf([
-                    A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5),
+                    A.ElasticTransform(alpha=120, sigma=120 * 0.05, p=0.5),
                     A.GridDistortion(p=0.5),
-                    A.OpticalDistortion(distort_limit=0.5, shift_limit=0.5, p=0.5),
+                    A.OpticalDistortion(distort_limit=0.5, p=0.5),
                 ], p=0.3),
                 A.OneOf([
-                    A.GaussNoise(var_limit=(10.0, 50.0), p=0.5),
+                    A.GaussNoise(p=0.5),
                     A.GaussianBlur(blur_limit=(3, 7), p=0.5),
                 ], p=0.3),
                 A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.3),
@@ -342,6 +345,34 @@ class SimpleUNet(nn.Module):
         out = self.final(d1)
         return out
 
+# Wrapper to handle padding for models that require specific input sizes
+class PaddedModel(nn.Module):
+    def __init__(self, model, divisor=32):
+        super().__init__()
+        self.model = model
+        self.divisor = divisor
+        
+    def forward(self, x):
+        # Get input shape
+        b, c, h, w = x.shape
+        
+        # Calculate padding needed
+        h_pad = (self.divisor - h % self.divisor) % self.divisor
+        w_pad = (self.divisor - w % self.divisor) % self.divisor
+        
+        # Pad if necessary
+        if h_pad > 0 or w_pad > 0:
+            x = F.pad(x, (0, w_pad, 0, h_pad), mode='reflect')
+        
+        # Forward through model
+        out = self.model(x)
+        
+        # Remove padding from output
+        if h_pad > 0 or w_pad > 0:
+            out = out[:, :, :h, :w]
+        
+        return out
+
 # Model factory
 def create_model():
     if not SMP_AVAILABLE:
@@ -383,7 +414,8 @@ def create_model():
     else:
         raise ValueError(f"Unknown model: {config.model_name}")
     
-    return model
+    # Wrap model to handle padding
+    return PaddedModel(model)
 
 # Mixup augmentation
 def mixup_data(x, y, alpha=1.0):
@@ -477,6 +509,15 @@ if config.use_amp:
 else:
     scaler = None
 
+# Helper for autocast compatibility
+def get_autocast():
+    try:
+        # Try new API first
+        return lambda: autocast('cuda')
+    except TypeError:
+        # Fall back to old API
+        return lambda: autocast()
+
 # Initialize wandb if enabled
 if config.use_wandb and WANDB_AVAILABLE:
     wandb.init(project="erosion-prediction", name=config.experiment_name, config=vars(config))
@@ -489,6 +530,9 @@ print("Starting training...")
 best_val_loss = float('inf')
 best_val_dice = 0.0
 patience_counter = 0
+
+# Get autocast context manager
+autocast_ctx = get_autocast()
 
 for epoch in range(config.epochs):
     # Training phase
@@ -504,7 +548,7 @@ for epoch in range(config.epochs):
             features, labels_a, labels_b, lam = mixup_data(features, labels, config.mixup_alpha)
             
             if config.use_amp:
-                with autocast():
+                with autocast_ctx():
                     outputs = model(features)
                     loss = mixup_criterion(criterion, outputs.squeeze(1), labels_a, labels_b, lam)
             else:
@@ -512,7 +556,7 @@ for epoch in range(config.epochs):
                 loss = mixup_criterion(criterion, outputs.squeeze(1), labels_a, labels_b, lam)
         else:
             if config.use_amp:
-                with autocast():
+                with autocast_ctx():
                     outputs = model(features)
                     loss = criterion(outputs.squeeze(1), labels)
             else:
@@ -553,7 +597,7 @@ for epoch in range(config.epochs):
             features, labels = features.to(device), labels.to(device)
             
             if config.use_amp:
-                with autocast():
+                with autocast_ctx():
                     outputs = model(features)
                     loss = criterion(outputs.squeeze(1), labels)
             else:
