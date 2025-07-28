@@ -705,8 +705,9 @@ print(f"Results saved to: {mydir}")
 
 # Load best model for final evaluation
 print("\nLoading best model for final evaluation...")
-checkpoint = torch.load(os.path.join(mydir, 'best_model.pth'))
-model.load_state_dict(checkpoint['model_state_dict'])
+if os.path.exists(os.path.join(mydir, 'best_model.pth')):
+    checkpoint = torch.load(os.path.join(mydir, 'best_model.pth'), weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
 # Generate predictions on validation set

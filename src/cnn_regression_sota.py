@@ -981,7 +981,7 @@ print(f"Results saved to: {mydir}")
 # Load best model for final evaluation and plotting
 print("\nLoading best model for final evaluation...")
 if os.path.exists(os.path.join(mydir, 'best_model.pth')):
-    checkpoint = torch.load(os.path.join(mydir, 'best_model.pth'))
+    checkpoint = torch.load(os.path.join(mydir, 'best_model.pth'), weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
