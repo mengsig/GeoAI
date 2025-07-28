@@ -154,7 +154,7 @@ def get_augmentation_pipeline(is_train=True):
                 # Only use transforms that preserve shape
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
-                A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=45, p=0.5),
+                A.Affine(scale=(0.8, 1.2), translate_percent=(-0.1, 0.1), rotate=(-45, 45), p=0.5),
                 A.OneOf([
                     A.ElasticTransform(alpha=120, sigma=120 * 0.05, p=0.5),
                     A.GridDistortion(p=0.5),
@@ -164,7 +164,7 @@ def get_augmentation_pipeline(is_train=True):
                     A.GaussNoise(p=0.5),
                     A.GaussianBlur(blur_limit=(3, 7), p=0.5),
                 ], p=0.3),
-                A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.3),
+                A.CoarseDropout(holes_range=(1, 8), hole_height_range=(4, 32), hole_width_range=(4, 32), p=0.3),
             ])
         else:
             # Use simple augmentation if albumentations not available
