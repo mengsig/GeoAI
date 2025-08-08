@@ -303,30 +303,50 @@ def evaluate_on_images(model, features, labels, device):
     return predictions
 
 
-# Evaluate on validation set (last sample)
-print("\nEvaluating on full images...")
-val_predictions = evaluate_on_images(model, features[-1:], labels[-1:], device)
+# Evaluate on test set (Set4_SS1)
+print("\nLoading test data from Set4_SS1...")
+test_subfolders = ["Set4_SS1_"]
+test_data = np.zeros((len(test_subfolders), input_size + output_size, x, y))
+
+for i, folder_prefix in enumerate(test_subfolders):
+    for j, file in enumerate(files):
+        file_path = f"{folder}/{folder_prefix[:4]}/{folder_prefix}{file}.csv"
+        test_data[i, j] = np.loadtxt(file_path, delimiter=",").reshape(x, y)
+
+# Apply same preprocessing as training data
+# log transform area and slope 
+test_data[:, 0, :, :] = np.log(test_data[:, 0, :, :] + 1)
+test_data[:, -2, :, :] = np.log(test_data[:, -2, :, :] + 1)
+
+features_test = test_data[:, :-1, :, :]
+labels_test = test_data[:, -1, :, :]
+
+# Use training mean and std for normalization
+features_test = (features_test - mean) / std
+
+print("\nEvaluating on test images...")
+test_predictions = evaluate_on_images(model, features_test, labels_test, device)
 
 
 # Visualize predictions
 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
 # Ground truth
-im1 = axes[0].imshow(labels[-1], cmap='viridis', aspect='auto')
-axes[0].set_title('Ground Truth Erosion')
+im1 = axes[0].imshow(labels_test[0], cmap='viridis', aspect='auto')
+axes[0].set_title('Ground Truth Erosion (Test)')
 axes[0].set_xlabel('X coordinate')
 axes[0].set_ylabel('Y coordinate')
 plt.colorbar(im1, ax=axes[0])
 
 # Predictions
-im2 = axes[1].imshow(val_predictions[0], cmap='viridis', aspect='auto')
-axes[1].set_title('MLP Predictions')
+im2 = axes[1].imshow(test_predictions[0], cmap='viridis', aspect='auto')
+axes[1].set_title('MLP Predictions (Test)')
 axes[1].set_xlabel('X coordinate')
 axes[1].set_ylabel('Y coordinate')
 plt.colorbar(im2, ax=axes[1])
 
 # Difference
-diff = val_predictions[0] - labels[-1].numpy()
+diff = test_predictions[0] - labels_test[0]
 im3 = axes[2].imshow(diff, cmap='RdBu_r', aspect='auto', vmin=-np.abs(diff).max(), vmax=np.abs(diff).max())
 axes[2].set_title('Prediction Error')
 axes[2].set_xlabel('X coordinate')
@@ -334,22 +354,22 @@ axes[2].set_ylabel('Y coordinate')
 plt.colorbar(im3, ax=axes[2])
 
 plt.tight_layout()
-plt.savefig(os.path.join(mydir, 'predictions_comparison.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(mydir, 'test_predictions_comparison.png'), dpi=300, bbox_inches='tight')
 plt.close()
 
 
-# Calculate and save metrics
-mse = np.mean((val_predictions[0] - labels[-1].numpy()) ** 2)
-mae = np.mean(np.abs(val_predictions[0] - labels[-1].numpy()))
+# Calculate and save test metrics
+mse = np.mean((test_predictions[0] - labels_test[0]) ** 2)
+mae = np.mean(np.abs(test_predictions[0] - labels_test[0]))
 rmse = np.sqrt(mse)
 
-print(f"\nValidation Metrics:")
+print(f"\nTest Metrics:")
 print(f"MSE: {mse:.6f}")
 print(f"MAE: {mae:.6f}")
 print(f"RMSE: {rmse:.6f}")
 
 # Save metrics
-with open(os.path.join(mydir, "validation_metrics.txt"), "w") as f:
+with open(os.path.join(mydir, "test_metrics.txt"), "w") as f:
     f.write(f"MSE: {mse:.6f}\n")
     f.write(f"MAE: {mae:.6f}\n")
     f.write(f"RMSE: {rmse:.6f}\n")
@@ -357,14 +377,32 @@ with open(os.path.join(mydir, "validation_metrics.txt"), "w") as f:
 
 # Create scatter plot of predictions vs ground truth
 plt.figure(figsize=(8, 8))
-plt.scatter(labels[-1].numpy().flatten(), val_predictions[0].flatten(), alpha=0.5, s=1)
-plt.plot([labels[-1].min(), labels[-1].max()], [labels[-1].min(), labels[-1].max()], 'r--', lw=2)
+plt.scatter(labels_test[0].flatten(), test_predictions[0].flatten(), alpha=0.5, s=1)
+plt.plot([labels_test[0].min(), labels_test[0].max()], [labels_test[0].min(), labels_test[0].max()], 'r--', lw=2)
 plt.xlabel('Ground Truth Erosion')
 plt.ylabel('Predicted Erosion')
-plt.title('MLP Cell-wise Predictions vs Ground Truth')
+plt.title('MLP Cell-wise Predictions vs Ground Truth (Test)')
 plt.grid(True, alpha=0.3)
 plt.axis('equal')
-plt.savefig(os.path.join(mydir, 'scatter_plot.png'), dpi=300, bbox_inches='tight')
+plt.savefig(os.path.join(mydir, 'test_scatter_plot.png'), dpi=300, bbox_inches='tight')
+plt.close()
+
+
+# Also create log-scale visualizations
+from matplotlib.colors import LogNorm
+
+fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+im1 = ax[0].imshow(test_predictions[0], cmap='viridis', aspect='auto',
+                   norm=LogNorm(vmin=0.01, vmax=test_predictions[0].max()))
+ax[0].set_title("Log of Erosion Predicted")
+im2 = ax[1].imshow(labels_test[0], cmap='viridis', aspect='auto',
+                   norm=LogNorm(vmin=0.01, vmax=labels_test[0].max()))
+ax[1].set_title("Log of Erosion Measured")
+ax[0].grid(False)
+ax[1].grid(False)
+plt.colorbar(im2, ax=ax[1])
+plt.tight_layout()
+plt.savefig(os.path.join(mydir, 'test_predictions_vs_labels_log.png'))
 plt.close()
 
 print(f"\nResults saved to: {mydir}")
