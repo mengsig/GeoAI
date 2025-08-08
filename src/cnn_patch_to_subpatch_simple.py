@@ -18,19 +18,17 @@ use_all_parameters = False  # boolean for all (true) or 4 (false) parameters
 
 
 # define model hyperparameters
-input_patch_size = 32   # Size of input patch (32x32)
-output_patch_size = 16  # Size of output sub-patch (16x16) - center of input patch
-stride = 8              # Stride for patch extraction during training
+input_patch_size = 16   # Smaller patches for stability
+output_patch_size = 8   # Smaller output patches
+stride = 4              # Smaller stride for more overlap
 lay1 = 32
 lay2 = 64
 lay3 = 128
-lay4 = 256
 kernel_size = 3
 metadata = {
     "CNN1": lay1,
     "CNN2": lay2,
     "CNN3": lay3,
-    "CNN4": lay4,
     "kernel": kernel_size,
     "input_patch_size": input_patch_size,
     "output_patch_size": output_patch_size,
@@ -104,7 +102,7 @@ features = (features - mean) / std
 
 class PatchToSubPatchDataset(Dataset):
     """Dataset that returns patches and their corresponding sub-patches"""
-    def __init__(self, features, labels, input_patch_size=32, output_patch_size=16, stride=8):
+    def __init__(self, features, labels, input_patch_size=16, output_patch_size=8, stride=4):
         self.features = features  # shape: [num_samples, channels, height, width]
         self.labels = labels      # shape: [num_samples, height, width]
         self.num_samples = features.shape[0]
@@ -162,7 +160,7 @@ train_dataset, val_dataset = torch.utils.data.random_split(
 )
 
 # Create data loaders
-batch_size = 32  # Reasonable batch size for patch processing
+batch_size = 64  # Larger batch size for smaller patches
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
@@ -178,92 +176,54 @@ with open(os.path.join(mydir, "meta_data.txt"), "w", newline="") as f:
         w.writerow([key, val])
 
 
-class CNNPatchToSubPatch(nn.Module):
-    """CNN that takes a patch and predicts erosion for a sub-patch within it"""
+class SimpleCNNPatchToSubPatch(nn.Module):
+    """Simpler CNN that takes a patch and predicts erosion for a sub-patch within it"""
     def __init__(self, input_channels, input_patch_size, output_patch_size, 
-                 lay1, lay2, lay3, lay4, kernel_size=3):
+                 lay1, lay2, lay3, kernel_size=3):
         super().__init__()
         self.input_patch_size = input_patch_size
         self.output_patch_size = output_patch_size
         
-        # Encoder layers
-        self.encoder1 = nn.Sequential(
+        # Simple encoder-decoder without excessive downsampling
+        self.conv1 = nn.Sequential(
             nn.Conv2d(input_channels, lay1, kernel_size=kernel_size, stride=1, padding=1),
             nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
             nn.Conv2d(lay1, lay1, kernel_size=kernel_size, stride=1, padding=1),
             nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
         )
         
-        self.encoder2 = nn.Sequential(
-            nn.Conv2d(lay1, lay2, kernel_size=kernel_size, stride=2, padding=1),
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(lay1, lay2, kernel_size=kernel_size, stride=1, padding=1),
             nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
             nn.Conv2d(lay2, lay2, kernel_size=kernel_size, stride=1, padding=1),
             nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
         )
         
-        self.encoder3 = nn.Sequential(
-            nn.Conv2d(lay2, lay3, kernel_size=kernel_size, stride=2, padding=1),
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(lay2, lay3, kernel_size=kernel_size, stride=1, padding=1),
             nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
             nn.Conv2d(lay3, lay3, kernel_size=kernel_size, stride=1, padding=1),
             nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
         )
         
-        self.encoder4 = nn.Sequential(
-            nn.Conv2d(lay3, lay4, kernel_size=kernel_size, stride=2, padding=1),
-            nn.BatchNorm2d(lay4),
-            nn.LeakyReLU(0.1),
-            nn.Conv2d(lay4, lay4, kernel_size=kernel_size, stride=1, padding=1),
-            nn.BatchNorm2d(lay4),
-            nn.LeakyReLU(0.1),
-        )
-        
-        # Decoder layers with skip connections
-        self.decoder3 = nn.Sequential(
-            nn.ConvTranspose2d(lay4, lay3, kernel_size=2, stride=2),
-            nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(0.1),
-        )
-        
-        self.decoder2 = nn.Sequential(
-            nn.Conv2d(lay3 * 2, lay3, kernel_size=kernel_size, stride=1, padding=1),
-            nn.BatchNorm2d(lay3),
-            nn.LeakyReLU(0.1),
-            nn.ConvTranspose2d(lay3, lay2, kernel_size=2, stride=2),
-            nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(0.1),
-        )
-        
-        self.decoder1 = nn.Sequential(
-            nn.Conv2d(lay2 * 2, lay2, kernel_size=kernel_size, stride=1, padding=1),
-            nn.BatchNorm2d(lay2),
-            nn.LeakyReLU(0.1),
-            nn.ConvTranspose2d(lay2, lay1, kernel_size=2, stride=2),
-            nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(0.1),
-        )
-        
-        self.final = nn.Sequential(
-            nn.Conv2d(lay1 * 2, lay1, kernel_size=kernel_size, stride=1, padding=1),
-            nn.BatchNorm2d(lay1),
-            nn.LeakyReLU(0.1),
-            nn.Conv2d(lay1, 1, kernel_size=1),
-        )
+        # Output layer
+        self.output = nn.Conv2d(lay3, 1, kernel_size=1)
         
         self.dropout = nn.Dropout2d(0.1)
         
-        # Initialize weights properly
+        # Initialize weights
         self._initialize_weights()
     
     def _initialize_weights(self):
         for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
@@ -271,51 +231,42 @@ class CNNPatchToSubPatch(nn.Module):
                 nn.init.constant_(m.bias, 0)
         
     def forward(self, x):
-        # Encoder
-        e1 = self.encoder1(x)
-        e2 = self.encoder2(e1)
-        e3 = self.encoder3(e2)
-        e4 = self.encoder4(e3)
+        # Simple forward pass
+        x = self.conv1(x)
+        x = self.dropout(x)
         
-        # Decoder with skip connections
-        d3 = self.decoder3(e4)
-        d3 = torch.cat([d3, e3], dim=1)
-        d3 = self.dropout(d3)
+        x = self.conv2(x)
+        x = self.dropout(x)
         
-        d2 = self.decoder2(d3)
-        d2 = torch.cat([d2, e2], dim=1)
-        d2 = self.dropout(d2)
+        x = self.conv3(x)
         
-        d1 = self.decoder1(d2)
-        d1 = torch.cat([d1, e1], dim=1)
+        x = self.output(x)
         
-        out = self.final(d1)
+        # Center crop to output size
+        if x.shape[2] != self.output_patch_size or x.shape[3] != self.output_patch_size:
+            offset = (x.shape[2] - self.output_patch_size) // 2
+            x = x[:, :, offset:offset+self.output_patch_size, offset:offset+self.output_patch_size]
         
-        # Crop to output size (center crop)
-        if out.shape[2] != self.output_patch_size or out.shape[3] != self.output_patch_size:
-            offset = (out.shape[2] - self.output_patch_size) // 2
-            out = out[:, :, offset:offset+self.output_patch_size, offset:offset+self.output_patch_size]
-        
-        return out.squeeze(1)  # Remove channel dimension
+        return x.squeeze(1)  # Remove channel dimension
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = CNNPatchToSubPatch(input_channels=input_size, input_patch_size=input_patch_size, 
-                           output_patch_size=output_patch_size, lay1=lay1, lay2=lay2, 
-                           lay3=lay3, lay4=lay4, kernel_size=kernel_size).to(device)
+model = SimpleCNNPatchToSubPatch(input_channels=input_size, input_patch_size=input_patch_size, 
+                                 output_patch_size=output_patch_size, lay1=lay1, lay2=lay2, 
+                                 lay3=lay3, kernel_size=kernel_size).to(device)
 
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 
-# Training setup
+# Training setup with conservative hyperparameters
 epochs = 150
 best_val_loss = float('inf')
-patience = 15
+patience = 20
 early_stopping_counter = 0
 
 criterion = nn.MSELoss()
-optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=1e-4)  # Lower learning rate
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+optimizer = optim.Adam(model.parameters(), lr=0.0001)  # Conservative learning rate
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
 
 train_losses = []
 val_losses = []
@@ -334,7 +285,7 @@ for epoch in range(epochs):
         loss = criterion(predictions, batch_labels)
         loss.backward()
         
-        # Gradient clipping to prevent exploding gradients
+        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         
         optimizer.step()
@@ -363,7 +314,7 @@ for epoch in range(epochs):
     val_loss /= val_samples
     val_losses.append(val_loss)
     
-    scheduler.step(val_loss)  # ReduceLROnPlateau needs the metric
+    scheduler.step(val_loss)
     
     # Early stopping
     if val_loss < best_val_loss:
@@ -398,7 +349,7 @@ plt.close()
 
 
 # Evaluate on full images by sliding window
-def evaluate_on_images_sliding_window(model, features, labels, input_patch_size, output_patch_size, device, stride=8):
+def evaluate_on_images_sliding_window(model, features, labels, input_patch_size, output_patch_size, device, stride=2):
     """Evaluate the model by sliding window prediction and averaging overlapping regions"""
     model.eval()
     num_samples = features.shape[0]
@@ -459,7 +410,7 @@ features_test = (features_test - mean) / std
 
 print("\nEvaluating on test images...")
 test_predictions = evaluate_on_images_sliding_window(model, features_test, labels_test, 
-                                                    input_patch_size, output_patch_size, device, stride=4)
+                                                    input_patch_size, output_patch_size, device, stride=2)
 
 
 # Visualize predictions
@@ -497,13 +448,8 @@ mask = ~np.isnan(test_predictions[0]) & (test_predictions[0] != 0)
 valid_preds = test_predictions[0][mask]
 valid_labels = labels_test[0][mask]
 
-# Clip predictions to reasonable range to avoid overflow
-valid_preds_clipped = np.clip(valid_preds, -1e6, 1e6)
-
-# Calculate metrics with numerical stability
-diff = valid_preds_clipped - valid_labels
-mse = np.mean(diff ** 2)
-mae = np.mean(np.abs(diff))
+mse = np.mean((valid_preds - valid_labels) ** 2)
+mae = np.mean(np.abs(valid_preds - valid_labels))
 rmse = np.sqrt(mse)
 
 print(f"\nTest Metrics (valid region):")
@@ -547,45 +493,6 @@ ax[1].grid(False)
 plt.colorbar(im2, ax=ax[1])
 plt.tight_layout()
 plt.savefig(os.path.join(mydir, 'test_predictions_vs_labels_log.png'))
-plt.close()
-
-
-# Visualize example patches and predictions
-fig, axes = plt.subplots(3, 4, figsize=(16, 12))
-fig.suptitle('Example Input Patches and Predicted Sub-Patches', fontsize=14)
-
-# Select random patches to visualize
-np.random.seed(42)
-num_examples = 4
-example_dataset = PatchToSubPatchDataset(features_test, labels_test, input_patch_size, output_patch_size, stride=16)
-random_indices = np.random.choice(len(example_dataset), num_examples, replace=False)
-
-model.eval()
-with torch.no_grad():
-    for i, idx in enumerate(random_indices):
-        input_patch, label_patch = example_dataset[idx]
-        
-        # Get prediction
-        input_tensor = input_patch.unsqueeze(0).to(device)
-        pred_patch = model(input_tensor).cpu().numpy()[0]
-        
-        # Show input patch (area channel)
-        axes[0, i].imshow(input_patch[0].numpy(), cmap='viridis')
-        axes[0, i].set_title(f'Input Patch (Area)')
-        axes[0, i].axis('off')
-        
-        # Show ground truth sub-patch
-        axes[1, i].imshow(label_patch.numpy(), cmap='viridis')
-        axes[1, i].set_title(f'Ground Truth Sub-Patch')
-        axes[1, i].axis('off')
-        
-        # Show predicted sub-patch
-        axes[2, i].imshow(pred_patch, cmap='viridis')
-        axes[2, i].set_title(f'Predicted Sub-Patch')
-        axes[2, i].axis('off')
-
-plt.tight_layout()
-plt.savefig(os.path.join(mydir, 'example_patches_predictions.png'), dpi=300, bbox_inches='tight')
 plt.close()
 
 print(f"\nResults saved to: {mydir}")
